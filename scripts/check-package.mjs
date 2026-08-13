@@ -6,11 +6,13 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 const cache = await mkdtemp(path.join(os.tmpdir(), "obsidian-mcp-npm-cache-"));
+const packArguments = ["pack", "--dry-run", "--json", "--ignore-scripts", "--cache", cache];
+const npmCli = process.env.npm_execpath;
 let stdout;
 try {
   ({ stdout } = await run(
-    "npm",
-    ["pack", "--dry-run", "--json", "--ignore-scripts", "--cache", cache],
+    npmCli === undefined ? "npm" : process.execPath,
+    npmCli === undefined ? packArguments : [npmCli, ...packArguments],
     { maxBuffer: 10 * 1024 * 1024 }
   ));
 } finally {
