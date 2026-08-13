@@ -40,6 +40,18 @@ test("modern stdio server advertises complete schemas and executes all twelve to
       assert.ok(tool.outputSchema);
       assert.equal(tool.inputSchema.$schema, "https://json-schema.org/draft/2020-12/schema");
       assert.ok(tool.annotations);
+      for (const [field, schema] of schemaProperties(tool.inputSchema)) {
+        assert.equal(
+          typeof schema.description,
+          "string",
+          `${tool.name}.${field} must describe how the argument is used`
+        );
+      }
+      const successData = successDataSchema(tool.outputSchema);
+      assert.ok(
+        "properties" in successData || "oneOf" in successData || "anyOf" in successData,
+        `${tool.name} must advertise a concrete data schema`
+      );
     }
     const manageSchema = listed.tools.find(
       (tool) => tool.name === "obsidian_manage_tags"
@@ -122,6 +134,38 @@ test("modern stdio server advertises complete schemas and executes all twelve to
       (escaped.structuredContent as { error: { code: string } }).error.code,
       "PATH_REJECTED"
     );
+
+    const invalidEdit = await client.callTool({
+      name: "obsidian_edit_note",
+      arguments: { vault: "test", path: "", operation: "merge", content: "x" }
+    });
+    assert.equal(invalidEdit.isError, true);
+    const invalidEditText = textOf(invalidEdit);
+    assert.match(invalidEditText, /path: Path cannot be empty\./u);
+    assert.match(
+      invalidEditText,
+      /operation: operation must be one of 'append', 'prepend', or 'replace'\./u
+    );
+
+    const unconfirmedDelete = await client.callTool({
+      name: "obsidian_delete_note",
+      arguments: { vault: "test", path: "Moved.md", mode: "permanent" }
+    });
+    assert.equal(unconfirmedDelete.isError, true);
+    assert.match(
+      textOf(unconfirmedDelete),
+      /confirm_path: confirm_path is required when mode is 'permanent'/u
+    );
+
+    const emptyTagRemoval = await client.callTool({
+      name: "obsidian_remove_tags",
+      arguments: { vault: "test", paths: ["Moved.md"], tags: [], patterns: [] }
+    });
+    assert.equal(emptyTagRemoval.isError, true);
+    assert.match(
+      textOf(emptyTagRemoval),
+      /tags: At least one tag or pattern is required for a remove operation\./u
+    );
   } finally {
     await client.close();
   }
@@ -185,4 +229,42 @@ async function success(
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function textOf(result: { content?: unknown }): string {
+  const content = result.content as Array<{ type: string; text?: string }> | undefined;
+  return content?.find((item) => item.type === "text")?.text ?? "";
+}
+
+function schemaProperties(
+  schema: Record<string, unknown>,
+  prefix = ""
+): Array<[string, Record<string, unknown>]> {
+  const found: Array<[string, Record<string, unknown>]> = [];
+  const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
+  if (properties !== undefined) {
+    for (const [name, property] of Object.entries(properties)) {
+      found.push([`${prefix}${name}`, property]);
+    }
+  }
+  for (const keyword of ["oneOf", "anyOf", "allOf"] as const) {
+    const branches = schema[keyword] as Record<string, unknown>[] | undefined;
+    for (const [index, branch] of branches?.entries() ?? []) {
+      found.push(...schemaProperties(branch, `${prefix}${keyword}[${index}].`));
+    }
+  }
+  return found;
+}
+
+function successDataSchema(outputSchema: Record<string, unknown>): Record<string, unknown> {
+  const branches = outputSchema.oneOf as Record<string, unknown>[] | undefined;
+  assert.ok(branches);
+  for (const branch of branches) {
+    const properties = branch.properties as Record<string, Record<string, unknown>> | undefined;
+    if (properties?.ok?.const === true) {
+      assert.ok(properties.data);
+      return properties.data;
+    }
+  }
+  assert.fail("Output schema has no successful data branch");
 }

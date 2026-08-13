@@ -7,7 +7,15 @@ import type { Runtime } from "../../runtime.js";
 import type { ToolDefinition } from "../../types.js";
 import { ToolFailure } from "../../utils/errors.js";
 import { planLinkUpdates } from "../../utils/links.js";
-import { etagSchema, relativePathSchema, vaultSchema } from "../../utils/schemas.js";
+import {
+  etagSchema,
+  nonNegativeIntegerSchema,
+  outputPathSchema,
+  pathListSchema,
+  relativePathSchema,
+  transactionIdSchema,
+  vaultSchema
+} from "../../utils/schemas.js";
 import { MUTATE } from "../../utils/tool-factory.js";
 import type { PlannedChange } from "../../utils/transaction.js";
 import { assertIfMatch } from "../../utils/validation.js";
@@ -18,21 +26,71 @@ const inputSchema = z
   .object({
     vault: vaultSchema,
     path: relativePathSchema,
-    mode: z.enum(["trash", "permanent"]).default("trash"),
-    reason: z.string().max(1_000).optional(),
-    backlink_action: z.enum(["preserve", "mark_broken"]).default("preserve"),
-    if_match: etagSchema.optional(),
-    confirm_path: relativePathSchema.optional()
+    mode: z
+      .enum(["trash", "permanent"], {
+        error: "mode must be 'trash' or 'permanent'. Use 'trash' for recoverable deletion."
+      })
+      .default("trash")
+      .meta({
+        description: "Recoverable MCP trash by default, or irreversible permanent deletion"
+      }),
+    reason: z
+      .string({ error: "reason must be a string." })
+      .max(1_000, "reason must be at most 1000 characters.")
+      .optional()
+      .meta({ description: "Optional deletion reason stored with recoverable trash metadata" }),
+    backlink_action: z
+      .enum(["preserve", "mark_broken"], {
+        error: "backlink_action must be 'preserve' or 'mark_broken'."
+      })
+      .default("preserve")
+      .meta({ description: "Whether backlinks remain unchanged or are marked as broken" }),
+    if_match: etagSchema.optional().meta({
+      description: "Optional revision guard returned by obsidian_read_note"
+    }),
+    confirm_path: relativePathSchema.optional().meta({
+      description: "Required for permanent deletion and must normalize to the path being deleted"
+    })
   })
-  .strict();
+  .strict()
+  .refine((value) => value.mode !== "permanent" || value.confirm_path !== undefined, {
+    path: ["confirm_path"],
+    error: "confirm_path is required when mode is 'permanent'; repeat the target path exactly."
+  });
 
-export function createDeleteNoteTool(runtime: Runtime): ToolDefinition<typeof inputSchema> {
+const outputSchema = z
+  .object({
+    path: outputPathSchema,
+    mode: z.enum(["trash", "permanent"]).meta({
+      description: "Deletion mode that was applied"
+    }),
+    trash_id: z.uuid().optional().meta({
+      description: "Recovery identifier present only when the note was moved to MCP trash"
+    }),
+    updated_backlinks: pathListSchema.meta({
+      description: "Notes updated by backlink handling"
+    }),
+    ambiguous_links: nonNegativeIntegerSchema.meta({
+      description: "Backlinks left unchanged because their targets were ambiguous"
+    }),
+    transaction_id: transactionIdSchema
+  })
+  .strict()
+  .refine((value) => (value.mode === "trash") === (value.trash_id !== undefined), {
+    path: ["trash_id"],
+    error: "trash_id must be present for trash deletion and absent for permanent deletion."
+  });
+
+export function createDeleteNoteTool(
+  runtime: Runtime
+): ToolDefinition<typeof inputSchema, typeof outputSchema> {
   return {
     name: TOOL_NAME,
     title: "Delete Obsidian Note",
     description:
       "Transactionally move a note to MCP trash or permanently delete it. Backlinks are preserved unless mark_broken is requested.",
     inputSchema,
+    outputSchema,
     annotations: MUTATE,
     execute: async ({
       vault,

@@ -25,6 +25,7 @@ test("tool registry is complete, ordered, and composed from unique definition fa
     assert.ok(definition.title);
     assert.ok(definition.description);
     assert.ok(definition.inputSchema);
+    assert.ok(definition.outputSchema);
     assert.equal(typeof definition.execute, "function");
     assert.equal(typeof definition.annotations.readOnlyHint, "boolean");
     assert.equal(typeof definition.annotations.destructiveHint, "boolean");

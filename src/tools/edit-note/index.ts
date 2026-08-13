@@ -4,7 +4,14 @@ import { MAX_CONTENT_BYTES } from "../../constants.js";
 import type { Runtime } from "../../runtime.js";
 import type { ToolDefinition } from "../../types.js";
 import { sha256 } from "../../utils/hash.js";
-import { etagSchema, relativePathSchema, vaultSchema } from "../../utils/schemas.js";
+import {
+  etagSchema,
+  outputEtagSchema,
+  outputPathSchema,
+  relativePathSchema,
+  transactionIdSchema,
+  vaultSchema
+} from "../../utils/schemas.js";
 import { MUTATE } from "../../utils/tool-factory.js";
 import { assertByteLimit, assertIfMatch } from "../../utils/validation.js";
 
@@ -14,19 +21,42 @@ const inputSchema = z
   .object({
     vault: vaultSchema,
     path: relativePathSchema,
-    operation: z.enum(["append", "prepend", "replace"]),
-    content: z.string().max(MAX_CONTENT_BYTES),
-    if_match: etagSchema.optional()
+    operation: z
+      .enum(["append", "prepend", "replace"], {
+        error: "operation must be one of 'append', 'prepend', or 'replace'."
+      })
+      .meta({ description: "How to combine content with the current note" }),
+    content: z
+      .string({ error: "content is required and must be a Markdown string." })
+      .max(MAX_CONTENT_BYTES, "Content exceeds the 5 MiB limit.")
+      .refine((value) => Buffer.byteLength(value) <= MAX_CONTENT_BYTES, {
+        error: "Content exceeds the 5 MiB UTF-8 byte limit."
+      })
+      .meta({ description: "Markdown content to append, prepend, or use as replacement" }),
+    if_match: etagSchema.optional().meta({
+      description: "Optional revision guard; obtain it from obsidian_read_note before editing"
+    })
   })
   .strict();
 
-export function createEditNoteTool(runtime: Runtime): ToolDefinition<typeof inputSchema> {
+const outputSchema = z
+  .object({
+    path: outputPathSchema,
+    etag: outputEtagSchema,
+    transaction_id: transactionIdSchema
+  })
+  .strict();
+
+export function createEditNoteTool(
+  runtime: Runtime
+): ToolDefinition<typeof inputSchema, typeof outputSchema> {
   return {
     name: TOOL_NAME,
     title: "Edit Obsidian Note",
     description:
       "Append, prepend, or replace note content byte-for-byte. This tool never deletes notes.",
     inputSchema,
+    outputSchema,
     annotations: MUTATE,
     execute: async ({ vault, path: notePath, operation, content, if_match }) => {
       assertByteLimit(content);

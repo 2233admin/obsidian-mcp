@@ -1,15 +1,12 @@
-import type { StandardSchemaWithJSON, ToolAnnotations } from "@modelcontextprotocol/server";
+import type { ToolAnnotations } from "@modelcontextprotocol/server";
+import type * as z from "zod";
 
-export type ToolData = Record<string, unknown>;
-
-export interface ToolDefinition<Input extends StandardSchemaWithJSON> {
+export interface ToolDefinition<Input extends z.ZodType, Data extends z.ZodType> {
   name: string;
   title: string;
   description: string;
   inputSchema: Input;
+  outputSchema: Data;
   annotations: ToolAnnotations;
-  execute: (
-    input: StandardSchemaWithJSON.InferOutput<Input>,
-    context: { signal: AbortSignal }
-  ) => Promise<ToolData>;
+  execute: (input: z.output<Input>, context: { signal: AbortSignal }) => Promise<z.output<Data>>;
 }

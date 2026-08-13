@@ -2,7 +2,14 @@ import * as z from "zod";
 
 import type { Runtime } from "../../runtime.js";
 import type { ToolDefinition } from "../../types.js";
-import { etagSchema, relativePathSchema, vaultSchema } from "../../utils/schemas.js";
+import {
+  etagSchema,
+  nonNegativeIntegerSchema,
+  nullableTransactionIdSchema,
+  outputPathSchema,
+  relativePathSchema,
+  vaultSchema
+} from "../../utils/schemas.js";
 import { normalizeTag, renameTag } from "../../utils/tags.js";
 import { MUTATE } from "../../utils/tool-factory.js";
 import type { PlannedChange } from "../../utils/transaction.js";
@@ -13,21 +20,69 @@ export const TOOL_NAME = "obsidian_rename_tag";
 const inputSchema = z
   .object({
     vault: vaultSchema,
-    old_tag: z.string().min(1).max(200),
-    new_tag: z.string().min(1).max(200),
-    location: z.enum(["frontmatter", "content", "both"]).default("both"),
-    include_children: z.boolean().default(false),
-    normalization: z.enum(["preserve", "lowercase", "kebab"]).default("preserve"),
-    expected_etags: z.record(relativePathSchema, etagSchema).optional()
+    old_tag: z
+      .string({ error: "old_tag is required and must be a tag string." })
+      .min(1, "old_tag cannot be empty.")
+      .max(200, "old_tag must be at most 200 characters.")
+      .meta({ description: "Existing tag to replace, without requiring a leading #" }),
+    new_tag: z
+      .string({ error: "new_tag is required and must be a tag string." })
+      .min(1, "new_tag cannot be empty.")
+      .max(200, "new_tag must be at most 200 characters.")
+      .meta({ description: "Replacement tag, without requiring a leading #" }),
+    location: z
+      .enum(["frontmatter", "content", "both"], {
+        error: "location must be 'frontmatter', 'content', or 'both'."
+      })
+      .default("both")
+      .meta({ description: "Where to rename matching tags" }),
+    include_children: z
+      .boolean({ error: "include_children must be true or false." })
+      .default(false)
+      .meta({
+        description: "Also rename descendants of old_tag"
+      }),
+    normalization: z
+      .enum(["preserve", "lowercase", "kebab"], {
+        error: "normalization must be 'preserve', 'lowercase', or 'kebab'."
+      })
+      .default("preserve")
+      .meta({ description: "Normalization applied to old and new tags" }),
+    expected_etags: z.record(relativePathSchema, etagSchema).optional().meta({
+      description: "Optional path-to-etag revision guards for affected notes"
+    })
   })
   .strict();
 
-export function createRenameTagTool(runtime: Runtime): ToolDefinition<typeof inputSchema> {
+const outputSchema = z
+  .object({
+    updated: z
+      .array(
+        z
+          .object({
+            path: outputPathSchema,
+            replacements: nonNegativeIntegerSchema
+          })
+          .strict()
+      )
+      .meta({ description: "Notes changed and their replacement counts" }),
+    transaction_id: nullableTransactionIdSchema
+  })
+  .strict()
+  .refine((value) => (value.updated.length === 0) === (value.transaction_id === null), {
+    path: ["transaction_id"],
+    error: "transaction_id must be null exactly when no notes were updated."
+  });
+
+export function createRenameTagTool(
+  runtime: Runtime
+): ToolDefinition<typeof inputSchema, typeof outputSchema> {
   return {
     name: TOOL_NAME,
     title: "Rename Obsidian Tag",
     description: "Rename a tag across a vault in one journaled all-or-nothing transaction.",
     inputSchema,
+    outputSchema,
     annotations: MUTATE,
     execute: async ({
       vault,

@@ -3,7 +3,12 @@ import * as z from "zod";
 import { DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT } from "../../constants.js";
 import type { Runtime } from "../../runtime.js";
 import type { ToolDefinition } from "../../types.js";
-import { relativePathSchema, vaultSchema } from "../../utils/schemas.js";
+import {
+  nonNegativeIntegerSchema,
+  outputPathSchema,
+  relativePathSchema,
+  vaultSchema
+} from "../../utils/schemas.js";
 import { searchVault } from "../../utils/search.js";
 import { READ_ONLY } from "../../utils/tool-factory.js";
 
@@ -12,22 +17,88 @@ export const TOOL_NAME = "obsidian_search_vault";
 const inputSchema = z
   .object({
     vault: vaultSchema,
-    query: z.string().min(1).max(1_000),
-    scope: relativePathSchema.optional(),
-    mode: z.enum(["content", "filename", "both", "tag"]).default("content"),
-    case_sensitive: z.boolean().default(false),
-    limit: z.number().int().min(1).max(MAX_SEARCH_LIMIT).default(DEFAULT_SEARCH_LIMIT),
-    cursor: z.string().max(4_096).optional()
+    query: z
+      .string({ error: "Search query is required and must be a string." })
+      .min(1, "Search query cannot be empty.")
+      .max(1_000, "Search query must be at most 1000 characters.")
+      .meta({
+        description: "Text, filename fragment, or tag to find",
+        examples: ["project/active"]
+      }),
+    scope: relativePathSchema.optional().meta({
+      description: "Optional vault-relative directory that limits the search"
+    }),
+    mode: z
+      .enum(["content", "filename", "both", "tag"], {
+        error: "mode must be 'content', 'filename', 'both', or 'tag'."
+      })
+      .default("content")
+      .meta({ description: "Where to match the query" }),
+    case_sensitive: z
+      .boolean({ error: "case_sensitive must be true or false." })
+      .default(false)
+      .meta({
+        description: "Use exact letter case for matching"
+      }),
+    limit: z
+      .number({ error: "limit must be an integer result count." })
+      .int("limit must be a whole number.")
+      .min(1, "limit must be at least 1.")
+      .max(MAX_SEARCH_LIMIT, `limit cannot exceed ${MAX_SEARCH_LIMIT}; use cursor to continue.`)
+      .default(DEFAULT_SEARCH_LIMIT)
+      .meta({ description: `Maximum matches to return (1-${MAX_SEARCH_LIMIT})` }),
+    cursor: z
+      .string({ error: "Search cursor must be the opaque next_cursor from a previous search." })
+      .max(4_096, "Search cursor is too long; pass next_cursor back unchanged.")
+      .optional()
+      .meta({ description: "Opaque continuation cursor for the same query and options" })
   })
   .strict();
 
-export function createSearchVaultTool(runtime: Runtime): ToolDefinition<typeof inputSchema> {
+const searchMatchSchema = z
+  .object({
+    path: outputPathSchema,
+    kind: z.enum(["content", "filename", "tag"]),
+    line: nonNegativeIntegerSchema.meta({
+      description: "One-based content line, or zero for filename/frontmatter matches"
+    }),
+    snippet: z.string().meta({ description: "Bounded matching excerpt" })
+  })
+  .strict();
+
+const outputSchema = z
+  .object({
+    matches: z.array(searchMatchSchema).meta({ description: "Ordered matches in this page" }),
+    count: nonNegativeIntegerSchema.meta({ description: "Number of matches in this page" }),
+    has_more: z.boolean().meta({ description: "Whether another page of matches is available" }),
+    next_cursor: z
+      .string()
+      .optional()
+      .meta({ description: "Opaque cursor for the next page when has_more is true" }),
+    warnings: z
+      .array(z.string())
+      .meta({ description: "Notes skipped because they were unreadable" })
+  })
+  .strict()
+  .refine((value) => value.count === value.matches.length, {
+    path: ["count"],
+    error: "Search count must equal the number of returned matches."
+  })
+  .refine((value) => value.has_more === (value.next_cursor !== undefined), {
+    path: ["next_cursor"],
+    error: "next_cursor must be present exactly when has_more is true."
+  });
+
+export function createSearchVaultTool(
+  runtime: Runtime
+): ToolDefinition<typeof inputSchema, typeof outputSchema> {
   return {
     name: TOOL_NAME,
     title: "Search Obsidian Vault",
     description:
       "Search filenames, content, or Obsidian tags with deterministic bounded pagination.",
     inputSchema,
+    outputSchema,
     annotations: READ_ONLY,
     execute: async ({ vault, query, scope, mode, case_sensitive, limit, cursor }, context) => {
       const service = runtime.forVault(vault);

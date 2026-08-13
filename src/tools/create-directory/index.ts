@@ -6,7 +6,12 @@ import * as z from "zod";
 import type { Runtime } from "../../runtime.js";
 import type { ToolDefinition } from "../../types.js";
 import { ToolFailure } from "../../utils/errors.js";
-import { relativePathSchema, vaultSchema } from "../../utils/schemas.js";
+import {
+  outputPathSchema,
+  relativePathSchema,
+  transactionIdSchema,
+  vaultSchema
+} from "../../utils/schemas.js";
 import { CREATE } from "../../utils/tool-factory.js";
 
 export const TOOL_NAME = "obsidian_create_directory";
@@ -15,17 +20,30 @@ const inputSchema = z
   .object({
     vault: vaultSchema,
     path: relativePathSchema,
-    recursive: z.boolean().default(true)
+    recursive: z.boolean({ error: "recursive must be true or false." }).default(true).meta({
+      description: "Create every missing parent directory; when false, the parent must exist"
+    })
   })
   .strict();
 
-export function createCreateDirectoryTool(runtime: Runtime): ToolDefinition<typeof inputSchema> {
+const outputSchema = z
+  .object({
+    path: outputPathSchema,
+    created: z.literal(true).meta({ description: "Confirms that the directory was created" }),
+    transaction_id: transactionIdSchema
+  })
+  .strict();
+
+export function createCreateDirectoryTool(
+  runtime: Runtime
+): ToolDefinition<typeof inputSchema, typeof outputSchema> {
   return {
     name: TOOL_NAME,
     title: "Create Obsidian Directory",
     description:
       "Transactionally create a directory inside a vault. Existing directories are rejected.",
     inputSchema,
+    outputSchema,
     annotations: CREATE,
     execute: async ({ vault, path: directory, recursive }) => {
       const service = runtime.forVault(vault);

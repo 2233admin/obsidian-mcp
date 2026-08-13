@@ -4,7 +4,16 @@ import type { Runtime } from "../../runtime.js";
 import type { ToolDefinition } from "../../types.js";
 import { ToolFailure } from "../../utils/errors.js";
 import { planLinkUpdates } from "../../utils/links.js";
-import { etagSchema, relativePathSchema, vaultSchema } from "../../utils/schemas.js";
+import {
+  etagSchema,
+  nonNegativeIntegerSchema,
+  outputEtagSchema,
+  outputPathSchema,
+  pathListSchema,
+  relativePathSchema,
+  transactionIdSchema,
+  vaultSchema
+} from "../../utils/schemas.js";
 import { MUTATE } from "../../utils/tool-factory.js";
 import { assertIfMatch } from "../../utils/validation.js";
 
@@ -13,20 +22,56 @@ export const TOOL_NAME = "obsidian_move_note";
 const inputSchema = z
   .object({
     vault: vaultSchema,
-    source: relativePathSchema,
-    destination: relativePathSchema,
-    update_links: z.boolean().default(true),
-    if_match: etagSchema.optional()
+    source: relativePathSchema.meta({
+      description: "Current vault-relative note path",
+      examples: ["Drafts/Plan.md"]
+    }),
+    destination: relativePathSchema.meta({
+      description: "New vault-relative note path; must not already exist",
+      examples: ["Projects/Plan.md"]
+    }),
+    update_links: z.boolean({ error: "update_links must be true or false." }).default(true).meta({
+      description: "Update unambiguous backlinks to the new path in the same transaction"
+    }),
+    if_match: etagSchema.optional().meta({
+      description: "Optional source revision guard returned by obsidian_read_note"
+    })
   })
-  .strict();
+  .strict()
+  .refine((value) => value.source !== value.destination, {
+    path: ["destination"],
+    error: "destination must differ from source."
+  });
 
-export function createMoveNoteTool(runtime: Runtime): ToolDefinition<typeof inputSchema> {
+const outputSchema = z
+  .object({
+    source: outputPathSchema,
+    destination: outputPathSchema,
+    etag: outputEtagSchema,
+    updated_backlinks: pathListSchema.meta({
+      description: "Notes whose backlinks were updated"
+    }),
+    ambiguous_links: nonNegativeIntegerSchema.meta({
+      description: "Backlinks left unchanged because their target was ambiguous"
+    }),
+    transaction_id: transactionIdSchema
+  })
+  .strict()
+  .refine((value) => value.source !== value.destination, {
+    path: ["destination"],
+    error: "Move output destination must differ from source."
+  });
+
+export function createMoveNoteTool(
+  runtime: Runtime
+): ToolDefinition<typeof inputSchema, typeof outputSchema> {
   return {
     name: TOOL_NAME,
     title: "Move Obsidian Note",
     description:
       "Move or rename a note within one vault without overwriting and transactionally update unambiguous backlinks.",
     inputSchema,
+    outputSchema,
     annotations: MUTATE,
     execute: async ({ vault, source, destination, update_links, if_match }) => {
       const service = runtime.forVault(vault);

@@ -4,7 +4,13 @@ import { DEFAULT_READ_CHARACTERS, MAX_RESPONSE_CHARACTERS } from "../../constant
 import type { Runtime } from "../../runtime.js";
 import type { ToolDefinition } from "../../types.js";
 import { ToolFailure } from "../../utils/errors.js";
-import { relativePathSchema, vaultSchema } from "../../utils/schemas.js";
+import {
+  nonNegativeIntegerSchema,
+  outputEtagSchema,
+  outputPathSchema,
+  relativePathSchema,
+  vaultSchema
+} from "../../utils/schemas.js";
 import { READ_ONLY } from "../../utils/tool-factory.js";
 
 export const TOOL_NAME = "obsidian_read_note";
@@ -13,18 +19,64 @@ const inputSchema = z
   .object({
     vault: vaultSchema,
     path: relativePathSchema,
-    cursor: z.string().max(2_048).optional(),
-    max_chars: z.number().int().min(1).max(MAX_RESPONSE_CHARACTERS).default(DEFAULT_READ_CHARACTERS)
+    cursor: z
+      .string({ error: "Read cursor must be the opaque string returned by a previous read." })
+      .max(2_048, "Read cursor is too long; use next_cursor from the previous read unchanged.")
+      .optional()
+      .meta({
+        description: "Opaque continuation cursor returned by a previous read of the same note"
+      }),
+    max_chars: z
+      .number({ error: "max_chars must be an integer number of characters." })
+      .int("max_chars must be a whole number.")
+      .min(1, "max_chars must be at least 1.")
+      .max(
+        MAX_RESPONSE_CHARACTERS,
+        `max_chars cannot exceed ${MAX_RESPONSE_CHARACTERS}; use next_cursor to continue reading.`
+      )
+      .default(DEFAULT_READ_CHARACTERS)
+      .meta({
+        description: `Maximum characters to return in this page (1-${MAX_RESPONSE_CHARACTERS})`,
+        examples: [20_000]
+      })
   })
   .strict();
 
-export function createReadNoteTool(runtime: Runtime): ToolDefinition<typeof inputSchema> {
+const outputSchema = z
+  .object({
+    path: outputPathSchema,
+    content: z.string().meta({ description: "UTF-8 Markdown content for this page" }),
+    etag: outputEtagSchema,
+    total_characters: nonNegativeIntegerSchema.meta({
+      description: "Total characters in the complete note"
+    }),
+    offset: nonNegativeIntegerSchema.meta({ description: "Character offset of this page" }),
+    has_more: z.boolean().meta({ description: "Whether another page is available" }),
+    next_cursor: z
+      .string()
+      .optional()
+      .meta({ description: "Opaque cursor for the next page when has_more is true" })
+  })
+  .strict()
+  .refine((value) => value.has_more === (value.next_cursor !== undefined), {
+    path: ["next_cursor"],
+    error: "next_cursor must be present exactly when has_more is true."
+  })
+  .refine((value) => value.offset + value.content.length <= value.total_characters, {
+    path: ["content"],
+    error: "Read page extends beyond total_characters."
+  });
+
+export function createReadNoteTool(
+  runtime: Runtime
+): ToolDefinition<typeof inputSchema, typeof outputSchema> {
   return {
     name: TOOL_NAME,
     title: "Read Obsidian Note",
     description:
       "Read a bounded page of a UTF-8 Markdown note. Use the returned cursor to continue and etag before editing.",
     inputSchema,
+    outputSchema,
     annotations: READ_ONLY,
     execute: async ({ vault, path: notePath, cursor, max_chars }) => {
       const service = runtime.forVault(vault);

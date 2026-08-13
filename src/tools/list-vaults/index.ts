@@ -7,14 +7,27 @@ import { READ_ONLY } from "../../utils/tool-factory.js";
 export const TOOL_NAME = "obsidian_list_vaults";
 
 const inputSchema = z.object({}).strict();
+const outputSchema = z
+  .object({
+    vaults: z.array(z.string().min(1)).meta({ description: "Configured vault ids" }),
+    count: z.number().int().nonnegative().meta({ description: "Number of configured vaults" })
+  })
+  .strict()
+  .refine((value) => value.count === value.vaults.length, {
+    path: ["count"],
+    error: "Vault count must equal the number of returned vault ids."
+  });
 
-export function createListVaultsTool(runtime: Runtime): ToolDefinition<typeof inputSchema> {
+export function createListVaultsTool(
+  runtime: Runtime
+): ToolDefinition<typeof inputSchema, typeof outputSchema> {
   return {
     name: TOOL_NAME,
     title: "List Obsidian Vaults",
     description:
       "List configured vault ids accepted by every other Obsidian tool. Returns no host paths.",
     inputSchema,
+    outputSchema,
     annotations: READ_ONLY,
     execute: () => {
       const vaults = runtime.registry.ids();

@@ -1,6 +1,6 @@
 import type {
   CallToolResult,
-  StandardSchemaWithJSON,
+  ServerContext,
   ToolAnnotations,
   ToolCallback
 } from "@modelcontextprotocol/server";
@@ -8,22 +8,8 @@ import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 
 import { MAX_RESPONSE_CHARACTERS } from "../constants.js";
-import type { ToolData, ToolDefinition } from "../types.js";
-import { asToolFailure } from "./errors.js";
-
-const errorSchema = z
-  .object({
-    code: z.string(),
-    message: z.string(),
-    retryable: z.boolean(),
-    details: z.record(z.string(), z.unknown()).optional()
-  })
-  .strict();
-
-const outputSchema = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), data: z.record(z.string(), z.unknown()) }).strict(),
-  z.object({ ok: z.literal(false), error: errorSchema }).strict()
-]);
+import type { ToolDefinition } from "../types.js";
+import { asToolFailure, publicToolErrorSchema } from "./errors.js";
 
 export const READ_ONLY: ToolAnnotations = {
   readOnlyHint: true,
@@ -46,31 +32,31 @@ export const MUTATE: ToolAnnotations = {
   openWorldHint: false
 };
 
-export function registerTool<Input extends StandardSchemaWithJSON>(
+export function registerTool<Input extends z.ZodType, Data extends z.ZodType>(
   server: McpServer,
-  definition: ToolDefinition<Input>
+  definition: ToolDefinition<Input, Data>
 ): void {
+  const outputSchema = toolResultSchema(definition.outputSchema);
   const handler = (async (
-    input: StandardSchemaWithJSON.InferOutput<Input>,
-    context: { signal: AbortSignal }
+    input: z.output<Input>,
+    context: ServerContext
   ): Promise<CallToolResult> => {
     try {
-      const data = await definition.execute(input, context);
-      const structuredContent = { ok: true, data };
+      const data = await definition.execute(input, { signal: context.mcpReq.signal });
       return {
         content: [{ type: "text", text: summarize(definition.title, data) }],
-        structuredContent
+        structuredContent: { ok: true, data }
       };
     } catch (error) {
       const failure = asToolFailure(error, definition.title.toLocaleLowerCase());
-      const structuredContent = { ok: false, error: failure.toPublic() };
+      const structuredContent = outputSchema.parse({ ok: false, error: failure.toPublic() });
       return {
         isError: true,
         content: [{ type: "text", text: `${failure.code}: ${failure.message}` }],
         structuredContent
       };
     }
-  }) as unknown as ToolCallback<Input>;
+  }) as ToolCallback<Input>;
 
   server.registerTool(
     definition.name,
@@ -85,7 +71,14 @@ export function registerTool<Input extends StandardSchemaWithJSON>(
   );
 }
 
-function summarize(title: string, data: ToolData): string {
+export function toolResultSchema<Data extends z.ZodType>(dataSchema: Data) {
+  return z.discriminatedUnion("ok", [
+    z.object({ ok: z.literal(true), data: dataSchema }).strict(),
+    z.object({ ok: z.literal(false), error: publicToolErrorSchema }).strict()
+  ]);
+}
+
+function summarize(title: string, data: unknown): string {
   const text = `${title} succeeded.\n${JSON.stringify(data, null, 2)}`;
   return text.length <= MAX_RESPONSE_CHARACTERS
     ? text

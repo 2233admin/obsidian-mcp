@@ -8,7 +8,13 @@ import type { Runtime } from "../../runtime.js";
 import type { ToolDefinition } from "../../types.js";
 import { ToolFailure } from "../../utils/errors.js";
 import { sha256 } from "../../utils/hash.js";
-import { relativePathSchema, vaultSchema } from "../../utils/schemas.js";
+import {
+  outputEtagSchema,
+  outputPathSchema,
+  relativePathSchema,
+  transactionIdSchema,
+  vaultSchema
+} from "../../utils/schemas.js";
 import { CREATE } from "../../utils/tool-factory.js";
 import { assertByteLimit } from "../../utils/validation.js";
 
@@ -18,18 +24,41 @@ const inputSchema = z
   .object({
     vault: vaultSchema,
     path: relativePathSchema,
-    content: z.string().max(MAX_CONTENT_BYTES).default(""),
-    create_parents: z.boolean().default(true)
+    content: z
+      .string({ error: "Note content must be a Markdown string." })
+      .max(MAX_CONTENT_BYTES, "Content exceeds the 5 MiB limit.")
+      .refine((value) => Buffer.byteLength(value) <= MAX_CONTENT_BYTES, {
+        error: "Content exceeds the 5 MiB UTF-8 byte limit."
+      })
+      .default("")
+      .meta({ description: "Initial Markdown content; defaults to an empty note" }),
+    create_parents: z
+      .boolean({ error: "create_parents must be true or false." })
+      .default(true)
+      .meta({
+        description: "Create missing parent directories before creating the note"
+      })
   })
   .strict();
 
-export function createCreateNoteTool(runtime: Runtime): ToolDefinition<typeof inputSchema> {
+const outputSchema = z
+  .object({
+    path: outputPathSchema,
+    etag: outputEtagSchema,
+    transaction_id: transactionIdSchema
+  })
+  .strict();
+
+export function createCreateNoteTool(
+  runtime: Runtime
+): ToolDefinition<typeof inputSchema, typeof outputSchema> {
   return {
     name: TOOL_NAME,
     title: "Create Obsidian Note",
     description:
       "Atomically create a Markdown note without overwriting an existing file. Parent directories are optional.",
     inputSchema,
+    outputSchema,
     annotations: CREATE,
     execute: async ({ vault, path: notePath, content, create_parents }) => {
       assertByteLimit(content);
