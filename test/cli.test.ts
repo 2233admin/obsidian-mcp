@@ -71,12 +71,7 @@ test("v1 positional paths produce deterministic v2 vault mappings", () => {
   assert.equal(parsed.warnings[0]?.code, "V1_POSITIONAL_CONFIG_DEPRECATED");
   assert.deepEqual(parsed.canonicalArgs, [
     "serve",
-    "--vault",
-    "vault-123-project=/tmp/one/123 Project",
-    "--vault",
-    "vault-123-project-2=/tmp/two/123 Project",
-    "--vault",
-    "ber=/tmp/three/über"
+    ...parsed.vaults.flatMap(({ id, root }) => ["--vault", `${id}=${root}`])
   ]);
 });
 

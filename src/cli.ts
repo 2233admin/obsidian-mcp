@@ -183,7 +183,7 @@ export function parseArguments(args: string[]): CliOptions | "help" | "version" 
       [
         `Did you mean '${suggestion}'?`,
         usageLine(),
-        "For an old v1 configuration, keep the vault path as the first argument and beta.3 will show its replacement."
+        "For an old v1 configuration, keep the vault path as the first argument and the server will show its replacement."
       ],
       "diagnostic-reference"
     );
