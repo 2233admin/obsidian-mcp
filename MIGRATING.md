@@ -5,7 +5,7 @@ Version 2 is an intentional breaking security and protocol release.
 ## Required changes
 
 1. Install Node.js 22 or 24 LTS.
-2. Upgrade the MCP host to one supporting MCP `2026-07-28`.
+2. Upgrade the MCP host to one supporting MCP `2026-07-28`, or add `--legacy serve` to the server arguments for a 2025-era client.
 3. Replace positional vault paths with `serve --vault id=/absolute/path` arguments.
 4. Update stored prompts and calls to the new prefixed snake_case tool names and fields.
 
@@ -30,4 +30,4 @@ Note tools now use one relative `path` instead of separate filename/folder value
 
 Version 2 uses `.obsidian-mcp` for transaction journals and MCP trash. It does not automatically modify or delete legacy `.backup` or `.trash` directories. Those directories are excluded from v2 scans and can be archived or removed manually after verifying their contents.
 
-Version 1.x is deprecated and receives no compatibility bridge. Upgrade promptly because its vault-containment implementation can permit access outside configured roots.
+Version 1.x is deprecated, and its CLI and tool API receive no compatibility bridge. Upgrade promptly because its vault-containment implementation can permit access outside configured roots.

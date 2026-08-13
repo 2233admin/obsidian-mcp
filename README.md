@@ -2,10 +2,42 @@
 
 A local [Model Context Protocol](https://modelcontextprotocol.io/) server that lets MCP-compatible assistants safely read and modify explicitly configured Obsidian vaults.
 
-Version 2 targets MCP `2026-07-28`, uses modern-only stdio transport, and requires Node.js 22 or newer. It works directly with Markdown files, so Obsidian does not need to be open.
+Version 2 targets MCP `2026-07-28`, defaults to modern-only stdio transport, and requires Node.js 22 or newer. It works directly with Markdown files, so Obsidian does not need to be open. Compatibility with 2025-era clients can be enabled explicitly at startup.
 
 > [!IMPORTANT]
 > MCP clients can invoke destructive tools. Back up important vaults, review client permission prompts, and use revision preconditions for concurrently edited notes.
+
+## Quick start
+
+```bash
+npm install -g obsidian-mcp@next
+node --version # v22 or newer
+```
+
+Each vault must already contain an `.obsidian` directory. Configure the server in your MCP client with an absolute vault path and the legacy compatibility flag:
+
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "obsidian-mcp",
+      "args": ["serve", "--legacy", "serve", "--vault", "notes=/absolute/path/to/vault"]
+    }
+  }
+}
+```
+
+The first `serve` selects the CLI command; the `serve` after `--legacy` enables compatibility with 2025-era clients. Clients that support MCP `2026-07-28` may omit `--legacy serve`. Without it, legacy initialization is rejected.
+
+Vault ids use lowercase letters, digits, `_`, and `-`, must begin with a letter, and are the values assistants pass to tools. Up to ten vaults may be configured. Repeat `--vault` to expose more than one vault:
+
+```bash
+obsidian-mcp serve --legacy serve \
+  --vault work=/Users/me/Documents/WorkVault \
+  --vault personal=/Users/me/Documents/PersonalVault
+```
+
+Network, removable, hidden, and synced locations are allowed because an explicit `--vault` is treated as authorization; the same containment protections apply to every location.
 
 ## Design principles
 
@@ -15,44 +47,6 @@ Version 2 targets MCP `2026-07-28`, uses modern-only stdio transport, and requir
 - The server never listens on a network interface or sends telemetry.
 - stdout is reserved exclusively for MCP messages; structured diagnostics go to stderr.
 - Results are bounded, paginated where appropriate, and available as both text and structured content.
-
-## Installation
-
-```bash
-npm install -g obsidian-mcp@next
-node --version # v22 or newer
-```
-
-Each vault must already contain an `.obsidian` directory. Configure stable vault ids explicitly:
-
-```bash
-obsidian-mcp serve \
-  --vault work=/Users/me/Documents/WorkVault \
-  --vault personal=/Users/me/Documents/PersonalVault
-```
-
-Vault ids use lowercase letters, digits, `_`, and `-`, must begin with a letter, and are the values assistants pass to tools. Up to ten vaults may be configured. Network, removable, hidden, and synced locations are allowed because an explicit `--vault` is treated as authorization; the same containment protections apply to every location.
-
-### Client configuration
-
-```json
-{
-  "mcpServers": {
-    "obsidian": {
-      "command": "obsidian-mcp",
-      "args": [
-        "serve",
-        "--vault",
-        "work=/absolute/path/to/work",
-        "--vault",
-        "personal=/absolute/path/to/personal"
-      ]
-    }
-  }
-}
-```
-
-The client must support MCP `2026-07-28`. Version 2 intentionally rejects legacy initialization.
 
 ## Tools
 

@@ -20,6 +20,7 @@ interface CliOptions {
   recoveryDays: number;
   recoveryMaxBytes: number;
   logLevel: LogLevel;
+  legacy: "serve" | "reject";
   recoveryId?: string;
 }
 
@@ -79,7 +80,7 @@ async function main(): Promise<void> {
     maxBufferSize: 10 * 1024 * 1024
   });
   const handle = serveStdio(() => buildServer(runtime), {
-    legacy: "reject",
+    legacy: parsed.legacy,
     transport,
     onerror: (error) => logger.log("error", "stdio_error", { message: error.message })
   });
@@ -112,6 +113,7 @@ function parseArguments(args: string[]): CliOptions | "help" | "version" {
   let recoveryDays = DEFAULT_RECOVERY_DAYS;
   let recoveryMaxBytes = DEFAULT_RECOVERY_BYTES;
   let logLevel: LogLevel = "info";
+  let legacy: CliOptions["legacy"] = "reject";
   let recoveryId: string | undefined;
   while (args.length > 0) {
     const flag = args.shift();
@@ -121,6 +123,8 @@ function parseArguments(args: string[]): CliOptions | "help" | "version" {
     else if (flag === "--recovery-days") recoveryDays = parsePositiveInteger(value, flag);
     else if (flag === "--recovery-max-bytes") recoveryMaxBytes = parsePositiveInteger(value, flag);
     else if (flag === "--log-level" && isLogLevel(value)) logLevel = value;
+    else if (flag === "--legacy" && isLegacyMode(value)) legacy = value;
+    else if (flag === "--legacy") throw new Error("--legacy must be 'serve' or 'reject'.");
     else if (flag === "--id") recoveryId = value;
     else throw new Error(`Unknown option '${flag}'.`);
   }
@@ -132,6 +136,7 @@ function parseArguments(args: string[]): CliOptions | "help" | "version" {
     recoveryDays,
     recoveryMaxBytes,
     logLevel,
+    legacy,
     ...(recoveryId === undefined ? {} : { recoveryId })
   };
 }
@@ -155,11 +160,15 @@ function isLogLevel(value: string): value is LogLevel {
   return value === "error" || value === "warn" || value === "info" || value === "debug";
 }
 
+function isLegacyMode(value: string): value is CliOptions["legacy"] {
+  return value === "serve" || value === "reject";
+}
+
 function helpText(): string {
   return `obsidian-mcp ${SERVER_VERSION}
 
 Usage:
-  obsidian-mcp serve --vault <id>=<absolute-path> [--vault ...]
+  obsidian-mcp serve --vault <id>=<absolute-path> [--vault ...] [--legacy serve|reject]
   obsidian-mcp doctor --vault <id>=<absolute-path> [--vault ...]
   obsidian-mcp recovery list --vault <id>=<absolute-path> [--vault ...]
   obsidian-mcp recovery restore --vault <id>=<absolute-path> --id <transaction-id>
@@ -169,6 +178,7 @@ Options:
   --recovery-days <days>       Completed journal retention (default: 30)
   --recovery-max-bytes <bytes> Recovery storage limit (default: 1073741824)
   --log-level <level>          error, warn, info, or debug
+  --legacy <mode>              2025-era client handling: serve or reject (default: reject)
   --help                       Show help
   --version                    Show version
 `;

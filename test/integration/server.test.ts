@@ -140,6 +140,37 @@ test("modern-only server rejects a legacy initialization", async () => {
   await transport.close();
 });
 
+test("server accepts a legacy initialization when explicitly enabled", async () => {
+  const root = await createVault("obsidian-mcp-legacy-enabled-");
+  const client = new Client({ name: "legacy-test", version: "1.0.0" });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [
+      "dist/main.js",
+      "serve",
+      "--vault",
+      `test=${root}`,
+      "--legacy",
+      "serve",
+      "--log-level",
+      "error"
+    ],
+    cwd: process.cwd(),
+    stderr: "pipe"
+  });
+  await client.connect(transport);
+  try {
+    assert.equal(client.getProtocolEra(), "legacy");
+    const listed = await client.listTools();
+    assert.deepEqual(
+      listed.tools.map((tool) => tool.name),
+      TOOL_NAMES
+    );
+  } finally {
+    await client.close();
+  }
+});
+
 async function success(
   client: Client,
   name: string,
