@@ -26,7 +26,7 @@ Run `obsidian-mcp doctor` with the same `--vault` arguments and include its sani
 **Environment (please complete the following information):**
 - OS and version: [e.g. Windows 11, macOS 15, Ubuntu 24.04]
 - Node.js version: [e.g. 24.1.0]
-- `obsidian-mcp` version: [e.g. 2.0.0-beta.4]
+- `obsidian-mcp` version: [e.g. 2.0.0]
 - MCP client and version:
 
 **Additional context**

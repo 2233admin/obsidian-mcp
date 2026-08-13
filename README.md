@@ -10,7 +10,7 @@ Version 2 supports both MCP `2026-07-28` and 2025-era clients by default, and re
 ## Quick start
 
 ```bash
-npm install -g obsidian-mcp@next
+npm install -g obsidian-mcp
 node --version # v22 or newer
 ```
 
@@ -32,7 +32,7 @@ Both protocol eras are served from the same tool definitions. After confirming t
 Vault ids use lowercase letters, digits, `_`, and `-`, must begin with a letter, and are the values assistants pass to tools. Up to ten vaults may be configured. Repeat `--vault` to expose more than one vault:
 
 ```bash
-obsidian-mcp serve --legacy serve \
+obsidian-mcp serve \
   --vault work=/Users/me/Documents/WorkVault \
   --vault personal=/Users/me/Documents/PersonalVault
 ```

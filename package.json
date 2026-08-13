@@ -1,6 +1,6 @@
 {
   "name": "obsidian-mcp",
-  "version": "2.0.0-beta.4",
+  "version": "2.0.0",
   "description": "A safe, local MCP server for working with Obsidian vaults",
   "type": "module",
   "main": "dist/main.js",
@@ -48,8 +48,7 @@
     "url": "git+https://github.com/StevenStavrakis/obsidian-mcp.git"
   },
   "publishConfig": {
-    "access": "public",
-    "tag": "next"
+    "access": "public"
   },
   "engines": {
     "node": ">=22"
