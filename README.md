@@ -2,7 +2,7 @@
 
 A local [Model Context Protocol](https://modelcontextprotocol.io/) server that lets MCP-compatible assistants safely read and modify explicitly configured Obsidian vaults.
 
-Version 2 targets MCP `2026-07-28`, defaults to modern-only stdio transport, and requires Node.js 22 or newer. It works directly with Markdown files, so Obsidian does not need to be open. Compatibility with 2025-era clients can be enabled explicitly at startup.
+Version 2 supports both MCP `2026-07-28` and 2025-era clients by default, and requires Node.js 22 or newer. It works directly with Markdown files, so Obsidian does not need to be open. Legacy protocol and v1 positional-path compatibility are deprecated and print exact migration instructions to stderr.
 
 > [!IMPORTANT]
 > MCP clients can invoke destructive tools. Back up important vaults, review client permission prompts, and use revision preconditions for concurrently edited notes.
@@ -14,20 +14,20 @@ npm install -g obsidian-mcp@next
 node --version # v22 or newer
 ```
 
-Each vault must already contain an `.obsidian` directory. Configure the server in your MCP client with an absolute vault path and the legacy compatibility flag:
+Each vault must already contain an `.obsidian` directory. Configure the server in your MCP client with an absolute vault path:
 
 ```json
 {
   "mcpServers": {
     "obsidian": {
       "command": "obsidian-mcp",
-      "args": ["serve", "--legacy", "serve", "--vault", "notes=/absolute/path/to/vault"]
+      "args": ["serve", "--vault", "notes=/absolute/path/to/vault"]
     }
   }
 }
 ```
 
-The first `serve` selects the CLI command; the `serve` after `--legacy` enables compatibility with 2025-era clients. Clients that support MCP `2026-07-28` may omit `--legacy serve`. Without it, legacy initialization is rejected.
+Both protocol eras are served from the same tool definitions. After confirming that your MCP client negotiates `2026-07-28`, you may opt into modern-only mode by adding `"--legacy", "reject"` to `args`.
 
 Vault ids use lowercase letters, digits, `_`, and `-`, must begin with a letter, and are the values assistants pass to tools. Up to ten vaults may be configured. Repeat `--vault` to expose more than one vault:
 
@@ -127,6 +127,8 @@ npm run ci
 Each tool owns a typed definition under `src/tools/<tool>/index.ts`; the small registry in `src/tools/index.ts` applies shared MCP registration and response behavior. Filesystem, transaction, Markdown, link, and search behavior live in reusable utilities. A new tool must use `VaultFs` for every path, `TransactionManager` for mutations, strict input/output schemas, structured results, annotations, and security/integration tests.
 
 See [MIGRATING.md](MIGRATING.md) for the 1.x migration and [SECURITY.md](SECURITY.md) for vulnerability reporting.
+
+Startup errors and compatibility warnings are written only to stderr with a stable code, the detected problem, an exact fix, a verification step, and a link to the matching migration section. If the server does not appear, find the code in the MCP client logs and use the [diagnostic reference](MIGRATING.md#diagnostic-reference).
 
 ## License
 

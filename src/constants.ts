@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
+
 export const SERVER_NAME = "obsidian-mcp-server";
-export const SERVER_VERSION = "2.0.0-beta.1";
+export const SERVER_VERSION = readPackageVersion();
 export const MCP_PROTOCOL_VERSION = "2026-07-28";
 export const MAX_VAULTS = 10;
 export const MAX_CONTENT_BYTES = 5 * 1024 * 1024;
@@ -19,3 +21,18 @@ export const RESERVED_ROOTS = new Set([
   ".backup",
   ".trash"
 ]);
+
+function readPackageVersion(): string {
+  const parsed: unknown = JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8")
+  );
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("version" in parsed) ||
+    typeof parsed.version !== "string"
+  ) {
+    throw new Error("package.json does not contain a string version.");
+  }
+  return parsed.version;
+}

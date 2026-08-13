@@ -3,6 +3,7 @@ import path from "node:path";
 import { TextDecoder } from "node:util";
 
 import { INTERNAL_DIRECTORY, MAX_CONTENT_BYTES, RESERVED_ROOTS } from "../constants.js";
+import { argsForDisplay, UserFacingError } from "./diagnostics.js";
 import { asToolFailure, isNodeError, ToolFailure } from "./errors.js";
 import { sha256 } from "./hash.js";
 
@@ -37,23 +38,100 @@ export class VaultRegistry {
 
     for (const definition of definitions) {
       if (!vaultIdPattern.test(definition.id)) {
-        throw new Error(
-          `Invalid vault id '${definition.id}'. Use a lowercase identifier beginning with a letter.`
+        throw configurationError(
+          "INVALID_VAULT_ID",
+          "A configured vault id is invalid.",
+          definition.id,
+          [
+            "Use 1-64 lowercase letters, numbers, underscores, or hyphens, beginning with a letter.",
+            `Example: ${argsForDisplay(["serve", "--vault", `notes=${definition.root}`])}`
+          ]
         );
       }
-      if (byId.has(definition.id)) throw new Error(`Duplicate vault id '${definition.id}'.`);
+      if (byId.has(definition.id)) {
+        throw configurationError(
+          "DUPLICATE_VAULT_ID",
+          "Every configured vault must have a unique id.",
+          definition.id,
+          `Rename one --vault id; for example, use '${definition.id}-2'.`
+        );
+      }
       if (!path.isAbsolute(definition.root)) {
-        throw new Error(`Vault '${definition.id}' must use an absolute path.`);
+        throw configurationError(
+          "VAULT_PATH_NOT_ABSOLUTE",
+          `Vault '${definition.id}' does not use an absolute path.`,
+          definition.root,
+          `Replace it with: ${argsForDisplay(["--vault", `${definition.id}=${path.resolve(definition.root)}`])}`
+        );
       }
 
-      const root = await fs.realpath(definition.root);
-      const stat = await fs.stat(root);
-      if (!stat.isDirectory()) throw new Error(`Vault '${definition.id}' is not a directory.`);
+      let root: string;
+      try {
+        root = await fs.realpath(definition.root);
+      } catch (error) {
+        if (isNodeError(error) && error.code === "ENOENT") {
+          throw configurationError(
+            "VAULT_PATH_NOT_FOUND",
+            `The configured path for vault '${definition.id}' does not exist.`,
+            definition.root,
+            [
+              "Correct the path in the MCP server configuration.",
+              `Expected argument form: ${argsForDisplay(["--vault", `${definition.id}=/correct/absolute/path`])}`
+            ],
+            error
+          );
+        }
+        throw configurationError(
+          "VAULT_PATH_UNREADABLE",
+          `The configured path for vault '${definition.id}' could not be resolved.`,
+          definition.root,
+          "Check directory permissions and confirm that every parent directory is accessible.",
+          error
+        );
+      }
+      let stat;
+      try {
+        stat = await fs.stat(root);
+      } catch (error) {
+        throw configurationError(
+          "VAULT_PATH_UNREADABLE",
+          `The configured path for vault '${definition.id}' could not be inspected.`,
+          root,
+          "Check directory permissions and filesystem availability, then restart the MCP client.",
+          error
+        );
+      }
+      if (!stat.isDirectory()) {
+        throw configurationError(
+          "VAULT_PATH_NOT_DIRECTORY",
+          `The configured path for vault '${definition.id}' is not a directory.`,
+          root,
+          "Select the Obsidian vault directory rather than a file inside it."
+        );
+      }
       const obsidian = path.join(root, ".obsidian");
       if (!(await isDirectory(obsidian))) {
-        throw new Error(`Vault '${definition.id}' does not contain a .obsidian directory.`);
+        throw configurationError(
+          "VAULT_NOT_INITIALIZED",
+          `Vault '${definition.id}' does not contain an .obsidian directory.`,
+          root,
+          [
+            "Open this directory as a vault in Obsidian and wait for it to initialize.",
+            "Then restart the MCP client."
+          ]
+        );
       }
-      await fs.access(root, fsConstants.R_OK | fsConstants.W_OK);
+      try {
+        await fs.access(root, fsConstants.R_OK | fsConstants.W_OK);
+      } catch (error) {
+        throw configurationError(
+          "VAULT_PERMISSION_DENIED",
+          `Vault '${definition.id}' is not readable and writable by this process.`,
+          root,
+          "Grant the MCP client read and write access to the vault, then restart it.",
+          error
+        );
+      }
       byId.set(definition.id, {
         id: definition.id,
         root,
@@ -71,7 +149,12 @@ export class VaultRegistry {
           b !== undefined &&
           (contains(a.root, b.root) || contains(b.root, a.root))
         ) {
-          throw new Error(`Vault roots '${a.id}' and '${b.id}' overlap.`);
+          throw configurationError(
+            "VAULT_ROOTS_OVERLAP",
+            "Configured vault roots overlap because they are duplicates or nested inside each other.",
+            [`${a.id}: ${a.root}`, `${b.id}: ${b.root}`],
+            "Remove one overlapping --vault argument or configure two independent vault roots."
+          );
         }
       }
     }
@@ -95,6 +178,27 @@ export class VaultRegistry {
   values(): ResolvedVault[] {
     return [...this.vaults.values()];
   }
+}
+
+function configurationError(
+  code: string,
+  problem: string,
+  detected: string | readonly string[],
+  fix: string | readonly string[],
+  cause?: unknown
+): UserFacingError {
+  return new UserFacingError(
+    {
+      code,
+      problem,
+      detected,
+      fix,
+      verify: "Run the same configuration with 'obsidian-mcp doctor' after applying the fix.",
+      helpAnchor: "vault-configuration-errors"
+    },
+    1,
+    cause === undefined ? undefined : { cause }
+  );
 }
 
 export class VaultFs {

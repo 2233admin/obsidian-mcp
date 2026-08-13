@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import type { Stream } from "node:stream";
 
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
@@ -29,6 +30,7 @@ test("modern stdio server advertises complete schemas and executes all twelve to
   await client.connect(transport);
   try {
     assert.equal(client.getProtocolEra(), "modern");
+    assert.equal(client.getServerVersion()?.version, packageVersion());
     const listed = await client.listTools();
     assert.deepEqual(
       listed.tools.map((tool) => tool.name),
@@ -171,7 +173,7 @@ test("modern stdio server advertises complete schemas and executes all twelve to
   }
 });
 
-test("modern-only server rejects a legacy initialization", async () => {
+test("server accepts a legacy initialization by default and emits migration guidance", async () => {
   const root = await createVault("obsidian-mcp-legacy-");
   const client = new Client({ name: "legacy-test", version: "1.0.0" });
   const transport = new StdioClientTransport({
@@ -180,12 +182,20 @@ test("modern-only server rejects a legacy initialization", async () => {
     cwd: process.cwd(),
     stderr: "pipe"
   });
-  await assert.rejects(() => client.connect(transport), /Unsupported protocol version|2026-07-28/u);
-  await transport.close();
+  const stderr = capture(transport.stderr);
+  await client.connect(transport);
+  try {
+    assert.equal(client.getProtocolEra(), "legacy");
+    await waitForText(stderr, "LEGACY_MCP_PROTOCOL");
+    assert.match(stderr.value, /Upgrade the MCP client or host/u);
+    assert.match(stderr.value, /More help:/u);
+  } finally {
+    await client.close();
+  }
 });
 
-test("server accepts a legacy initialization when explicitly enabled", async () => {
-  const root = await createVault("obsidian-mcp-legacy-enabled-");
+test("modern-only mode rejects legacy initialization with a corrective diagnostic", async () => {
+  const root = await createVault("obsidian-mcp-legacy-rejected-");
   const client = new Client({ name: "legacy-test", version: "1.0.0" });
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -195,21 +205,37 @@ test("server accepts a legacy initialization when explicitly enabled", async () 
       "--vault",
       `test=${root}`,
       "--legacy",
-      "serve",
+      "reject",
       "--log-level",
       "error"
     ],
     cwd: process.cwd(),
     stderr: "pipe"
   });
+  const stderr = capture(transport.stderr);
+  await assert.rejects(() => client.connect(transport), /Unsupported protocol version|2026-07-28/u);
+  await waitForText(stderr, "STRICT_PROTOCOL_REJECTION");
+  assert.match(stderr.value, /--legacy.*serve/u);
+  await transport.close();
+});
+
+test("unchanged v1 positional configuration starts and prints exact replacement args", async () => {
+  const root = await createVault("Obsidian MCP Legacy Vault-");
+  const client = new Client({ name: "legacy-config-test", version: "1.0.0" });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["dist/main.js", root],
+    cwd: process.cwd(),
+    stderr: "pipe"
+  });
+  const stderr = capture(transport.stderr);
   await client.connect(transport);
   try {
     assert.equal(client.getProtocolEra(), "legacy");
-    const listed = await client.listTools();
-    assert.deepEqual(
-      listed.tools.map((tool) => tool.name),
-      TOOL_NAMES
-    );
+    await waitForText(stderr, "V1_POSITIONAL_CONFIG_DEPRECATED");
+    assert.match(stderr.value, /\["serve","--vault"/u);
+    assert.match(stderr.value, /Restart the MCP client/u);
+    assert.match(stderr.value, /LEGACY_MCP_PROTOCOL/u);
   } finally {
     await client.close();
   }
@@ -267,4 +293,29 @@ function successDataSchema(outputSchema: Record<string, unknown>): Record<string
     }
   }
   assert.fail("Output schema has no successful data branch");
+}
+
+function packageVersion(): string {
+  const value = JSON.parse(requirePackageJson()) as { version: string };
+  return value.version;
+}
+
+function requirePackageJson(): string {
+  return readFileSync(new URL("../../package.json", import.meta.url), "utf8");
+}
+
+function capture(stream: Stream | null): { value: string } {
+  const target = { value: "" };
+  stream?.on("data", (chunk: Buffer | string) => {
+    target.value += chunk.toString();
+  });
+  return target;
+}
+
+async function waitForText(target: { value: string }, text: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!target.value.includes(text) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.match(target.value, new RegExp(text, "u"));
 }

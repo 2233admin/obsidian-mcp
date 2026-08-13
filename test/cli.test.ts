@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { parseArguments } from "../src/cli.js";
 import { Logger } from "../src/utils/logger.js";
 import { TransactionManager } from "../src/utils/transaction.js";
 import { VaultRegistry, sha256 } from "../src/utils/vault.js";
@@ -18,10 +19,84 @@ test("startup failures never write non-MCP output to stdout", async () => {
     (error: unknown) => {
       const failure = error as Error & { stdout?: string; stderr?: string };
       assert.equal(failure.stdout, "");
-      assert.match(failure.stderr ?? "", /obsidian-mcp:/u);
+      assert.match(failure.stderr ?? "", /error \[VAULT_PATH_NOT_FOUND\]/u);
+      assert.match(failure.stderr ?? "", /Problem:/u);
+      assert.match(failure.stderr ?? "", /Detected: \/does\/not\/exist/u);
+      assert.match(failure.stderr ?? "", /Fix:/u);
+      assert.match(failure.stderr ?? "", /Verify:/u);
+      assert.match(failure.stderr ?? "", /More help:/u);
       return true;
     }
   );
+});
+
+test("CLI usage failures are actionable, typo-aware, and exit with status 2", async () => {
+  await assert.rejects(
+    () => run(process.execPath, ["dist/main.js", "server"]),
+    (error: unknown) => {
+      const failure = error as Error & { code?: number; stdout?: string; stderr?: string };
+      assert.equal(failure.code, 2);
+      assert.equal(failure.stdout, "");
+      assert.match(failure.stderr ?? "", /error \[CLI_UNKNOWN_COMMAND\]/u);
+      assert.match(failure.stderr ?? "", /Did you mean 'serve'\?/u);
+      return true;
+    }
+  );
+
+  await assert.rejects(
+    () => run(process.execPath, ["dist/main.js", "serve", "--valt", "/vault"]),
+    (error: unknown) => {
+      const failure = error as Error & { code?: number; stdout?: string; stderr?: string };
+      assert.equal(failure.code, 2);
+      assert.equal(failure.stdout, "");
+      assert.match(failure.stderr ?? "", /error \[CLI_UNKNOWN_OPTION\]/u);
+      assert.match(failure.stderr ?? "", /Did you mean '--vault'\?/u);
+      return true;
+    }
+  );
+});
+
+test("v1 positional paths produce deterministic v2 vault mappings", () => {
+  const parsed = parseArguments([
+    "/tmp/one/123 Project",
+    "/tmp/two/123 Project",
+    "/tmp/three/über"
+  ]);
+  if (typeof parsed === "string") assert.fail("Expected parsed CLI options.");
+  assert.deepEqual(
+    parsed.vaults.map(({ id }) => id),
+    ["vault-123-project", "vault-123-project-2", "ber"]
+  );
+  assert.equal(parsed.legacy, "serve");
+  assert.equal(parsed.warnings[0]?.code, "V1_POSITIONAL_CONFIG_DEPRECATED");
+  assert.deepEqual(parsed.canonicalArgs, [
+    "serve",
+    "--vault",
+    "vault-123-project=/tmp/one/123 Project",
+    "--vault",
+    "vault-123-project-2=/tmp/two/123 Project",
+    "--vault",
+    "ber=/tmp/three/über"
+  ]);
+});
+
+test("mixed positional and v2 vault syntax is rejected with a replacement", () => {
+  assert.throws(
+    () => parseArguments(["/tmp/vault", "--vault", "notes=/tmp/vault"]),
+    (error: unknown) => {
+      assert.match(String(error), /Positional vault paths cannot be mixed/u);
+      return true;
+    }
+  );
+});
+
+test("CLI and package versions stay synchronized", async () => {
+  const packageJson = JSON.parse(await fs.readFile("package.json", "utf8")) as {
+    version: string;
+  };
+  const result = await run(process.execPath, ["dist/main.js", "--version"]);
+  assert.equal(result.stdout.trim(), packageJson.version);
+  assert.equal(result.stderr, "");
 });
 
 test("doctor and recovery CLI commands operate on an explicit vault", async () => {
