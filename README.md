@@ -1,151 +1,138 @@
-# Obsidian MCP Server
+# Obsidian MCP
 
-[![smithery badge](https://smithery.ai/badge/obsidian-mcp)](https://smithery.ai/server/obsidian-mcp)
+A local [Model Context Protocol](https://modelcontextprotocol.io/) server that lets MCP-compatible assistants safely read and modify explicitly configured Obsidian vaults.
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that enables AI assistants to interact with Obsidian vaults, providing tools for reading, creating, editing and managing notes and tags.
+Version 2 targets MCP `2026-07-28`, uses modern-only stdio transport, and requires Node.js 22 or newer. It works directly with Markdown files, so Obsidian does not need to be open.
 
-## Warning!!!
+> [!IMPORTANT]
+> MCP clients can invoke destructive tools. Back up important vaults, review client permission prompts, and use revision preconditions for concurrently edited notes.
 
-This MCP has read and write access (if you allow it). Please. PLEASE backup your Obsidian vault prior to using obsidian-mcp to manage your notes. I recommend using git, but any backup method will work. These tools have been tested, but not thoroughly, and this MCP is in active development.
+## Design principles
 
-## Features
+- Vault access is explicitly allowlisted at process startup.
+- Every tool path is vault-relative, segment-checked, and blocked from symlinks and reserved state.
+- File mutations are journaled, conflict-checked, atomically replaced, and rolled back as one transaction.
+- The server never listens on a network interface or sends telemetry.
+- stdout is reserved exclusively for MCP messages; structured diagnostics go to stderr.
+- Results are bounded, paginated where appropriate, and available as both text and structured content.
 
-- Read and search notes in your vault
-- Create new notes and directories
-- Edit existing notes
-- Move and delete notes
-- Manage tags (add, remove, rename)
-- Search vault contents
+## Installation
 
-## Requirements
+```bash
+npm install -g obsidian-mcp@next
+node --version # v22 or newer
+```
 
-- Node.js 20 or higher (might work on lower, but I haven't tested it)
-- An Obsidian vault
+Each vault must already contain an `.obsidian` directory. Configure stable vault ids explicitly:
 
-## Install
+```bash
+obsidian-mcp serve \
+  --vault work=/Users/me/Documents/WorkVault \
+  --vault personal=/Users/me/Documents/PersonalVault
+```
 
-### Installing Manually
+Vault ids use lowercase letters, digits, `_`, and `-`, must begin with a letter, and are the values assistants pass to tools. Up to ten vaults may be configured. Network, removable, hidden, and synced locations are allowed because an explicit `--vault` is treated as authorization; the same containment protections apply to every location.
 
-Add to your Claude Desktop configuration:
-
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+### Client configuration
 
 ```json
 {
-    "mcpServers": {
-        "obsidian": {
-            "command": "npx",
-            "args": ["-y", "obsidian-mcp", "/path/to/your/vault", "/path/to/your/vault2"]
-        }
+  "mcpServers": {
+    "obsidian": {
+      "command": "obsidian-mcp",
+      "args": [
+        "serve",
+        "--vault",
+        "work=/absolute/path/to/work",
+        "--vault",
+        "personal=/absolute/path/to/personal"
+      ]
     }
+  }
 }
 ```
 
-Replace `/path/to/your/vault` with the absolute path to your Obsidian vault. For example:
+The client must support MCP `2026-07-28`. Version 2 intentionally rejects legacy initialization.
 
-MacOS/Linux:
+## Tools
 
-```json
-"/Users/username/Documents/MyVault"
-```
+| Tool                        | Purpose                                                                       |
+| --------------------------- | ----------------------------------------------------------------------------- |
+| `obsidian_list_vaults`      | List configured vault ids without exposing host paths.                        |
+| `obsidian_read_note`        | Read a bounded page of a note and return its SHA-256 `etag`.                  |
+| `obsidian_create_note`      | Atomically create a note without overwriting.                                 |
+| `obsidian_edit_note`        | Append, prepend, or replace exact note content.                               |
+| `obsidian_delete_note`      | Move a note to MCP trash or permanently delete it with explicit confirmation. |
+| `obsidian_move_note`        | Move or rename a note and update unambiguous backlinks transactionally.       |
+| `obsidian_create_directory` | Transactionally create a directory inside a vault.                            |
+| `obsidian_search_vault`     | Search content, filenames, or tags with bounded cursor pagination.            |
+| `obsidian_add_tags`         | Add tags to one or more notes atomically.                                     |
+| `obsidian_remove_tags`      | Remove exact, nested, or wildcard-selected tags atomically.                   |
+| `obsidian_rename_tag`       | Rename a tag across the vault atomically.                                     |
+| `obsidian_manage_tags`      | Unified add/remove tag workflow using the same implementation.                |
 
-Windows:
+All schemas are strict JSON Schema 2020-12 contracts generated from Zod. Mutating results include a transaction id; tool failures return `isError: true` with an actionable error code.
 
-```json
-"C:\\Users\\username\\Documents\\MyVault"
-```
+### Reading and concurrency
 
-Restart Claude for Desktop after saving the configuration. You should see the hammer icon appear, indicating the server is connected.
+`obsidian_read_note` returns an `etag`. Pass it as `if_match` to edit, move, or delete when avoiding lost updates matters. Batch tag operations accept an `expected_etags` map. A changed note returns `REVISION_CONFLICT` rather than being overwritten.
 
-If you have connection issues, check the logs at:
+Large notes are paginated using an opaque cursor bound to the path and `etag`. Search uses an opaque cursor bound to the query and options. Tool text responses are capped at 25,000 characters.
 
-- MacOS: `~/Library/Logs/Claude/mcp*.log`
-- Windows: `%APPDATA%\Claude\logs\mcp*.log`
+### Deletion and recovery
 
+Trash is the default. Deleted note bytes and metadata are stored separately under `.obsidian-mcp/trash`; metadata is never injected into the note. Permanent deletion requires `confirm_path` to exactly match the canonical relative path.
 
-### Installing via Smithery
-Warning: I am not affiliated with Smithery. I have not tested using it and encourage users to install manually if they can.
-
-To install Obsidian for Claude Desktop automatically via [Smithery](https://smithery.ai/server/obsidian-mcp):
+Transactions and recovery snapshots live in `.obsidian-mcp/transactions`. Completed data is retained for 30 days and pruned oldest-first above 1 GiB by default:
 
 ```bash
-npx -y @smithery/cli install obsidian-mcp --client claude
+obsidian-mcp serve --vault work=/path \
+  --recovery-days 14 \
+  --recovery-max-bytes 536870912
 ```
+
+Inspect or restore a completed transaction while the MCP server is stopped:
+
+```bash
+obsidian-mcp recovery list --vault work=/path
+obsidian-mcp recovery restore --vault work=/path --id <transaction-id>
+```
+
+Recovery refuses to overwrite content changed since the selected transaction. Permanent deletion snapshots are purged after commit and cannot be restored.
+
+## Path and filesystem safety
+
+The server:
+
+- canonicalizes configured vault roots and rejects duplicate or nested roots;
+- rejects absolute, UNC, Windows-drive, NUL, backslash, empty, and dot-segment tool paths;
+- reserves `.obsidian`, `.obsidian-mcp`, `.git`, `.backup`, and `.trash` from tool access;
+- checks existing targets and the nearest existing ancestor for new targets;
+- rejects symlinks, junctions, and reparse-point paths, and skips them during scans;
+- performs no shell execution for filesystem validation;
+- strictly decodes UTF-8 and does not silently replace invalid bytes.
+
+The process needs read and write access to each configured vault. `obsidian-mcp doctor --vault id=/path` validates startup readiness and recovery state.
+
+## Link and tag behavior
+
+Moves recognize Obsidian Wikilinks, embeds, Markdown links, aliases, URL-encoded destinations, headings, and block anchors. A link is rewritten only when it resolves unambiguously to the source note; ambiguous links are reported and left unchanged. Deletion preserves backlinks unless `backlink_action: "mark_broken"` is requested.
+
+Tags follow Obsidian's case-insensitive rules and support Unicode, emoji, `_`, `-`, `/`, and nested tags. Frontmatter tags are written as YAML lists. Inline tag processing ignores fenced/inline code and HTML comments. Wildcards use a bounded matcher rather than regular expressions.
 
 ## Development
 
 ```bash
-# Clone the repository
-git clone https://github.com/StevenStavrakis/obsidian-mcp
-cd obsidian-mcp
-
-# Install dependencies
-npm install
-
-# Build
+npm ci
+npm run typecheck
+npm test
 npm run build
+npm run ci
 ```
 
-Then add to your Claude Desktop configuration:
+Each tool owns a typed definition under `src/tools/<tool>/index.ts`; the small registry in `src/tools/index.ts` applies shared MCP registration and response behavior. Filesystem, transaction, Markdown, link, and search behavior live in reusable utilities. A new tool must use `VaultFs` for every path, `TransactionManager` for mutations, strict input/output schemas, structured results, annotations, and security/integration tests.
 
-```json
-{
-    "mcpServers": {
-        "obsidian": {
-            "command": "node",
-            "args": ["<absolute-path-to-obsidian-mcp>/build/main.js", "/path/to/your/vault", "/path/to/your/vault2"]
-        }
-    }
-}
-```
-
-## Available Tools
-
-- `read-note` - Read the contents of a note
-- `create-note` - Create a new note
-- `edit-note` - Edit an existing note
-- `delete-note` - Delete a note
-- `move-note` - Move a note to a different location
-- `create-directory` - Create a new directory
-- `search-vault` - Search notes in the vault
-- `add-tags` - Add tags to a note
-- `remove-tags` - Remove tags from a note
-- `rename-tag` - Rename a tag across all notes
-- `manage-tags` - List and organize tags
-- `list-available-vaults` - List all available vaults (helps with multi-vault setups)
-
-## Documentation
-
-Additional documentation can be found in the `docs` directory:
-
-- `creating-tools.md` - Guide for creating new tools
-- `tool-examples.md` - Examples of using the available tools
-
-## Security
-
-This server requires access to your Obsidian vault directory. When configuring the server, make sure to:
-
-- Only provide access to your intended vault directory
-- Review tool actions before approving them
-
-## Troubleshooting
-
-Common issues:
-
-1. **Server not showing up in Claude Desktop**
-   - Verify your configuration file syntax
-   - Make sure the vault path is absolute and exists
-   - Restart Claude Desktop
-
-2. **Permission errors**
-   - Ensure the vault path is readable/writable
-   - Check file permissions in your vault
-
-3. **Tool execution failures**
-   - Check Claude Desktop logs at:
-     - macOS: `~/Library/Logs/Claude/mcp*.log`
-     - Windows: `%APPDATA%\Claude\logs\mcp*.log`
+See [MIGRATING.md](MIGRATING.md) for the 1.x migration and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ## License
 

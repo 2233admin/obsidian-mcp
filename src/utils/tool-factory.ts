@@ -1,121 +1,93 @@
-import { z } from "zod";
-import { Tool } from "../types.js";
-import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { createSchemaHandler } from "./schema.js";
-import { VaultResolver } from "./vault-resolver.js";
+import type {
+  CallToolResult,
+  StandardSchemaWithJSON,
+  ToolAnnotations,
+  ToolCallback
+} from "@modelcontextprotocol/server";
+import type { McpServer } from "@modelcontextprotocol/server";
+import * as z from "zod";
 
-export interface BaseToolConfig<T> {
-  name: string;
-  description: string;
-  schema?: z.ZodType<any>;
-  handler: (
-    args: T,
-    sourcePath: string,
-    sourceVaultName: string,
-    destinationPath?: string,
-    destinationVaultName?: string,
-    isCrossVault?: boolean
-  ) => Promise<any>;
-}
+import { MAX_RESPONSE_CHARACTERS } from "../constants.js";
+import type { ToolData, ToolDefinition } from "../types.js";
+import { asToolFailure } from "./errors.js";
 
-/**
- * Creates a standardized tool with common error handling and vault validation
- */
-export function createTool<T extends { vault: string }>(
-  config: BaseToolConfig<T>,
-  vaults: Map<string, string>
-): Tool {
-  const vaultResolver = new VaultResolver(vaults);
-  const schemaHandler = config.schema ? createSchemaHandler(config.schema) : undefined;
+const errorSchema = z
+  .object({
+    code: z.string(),
+    message: z.string(),
+    retryable: z.boolean(),
+    details: z.record(z.string(), z.unknown()).optional()
+  })
+  .strict();
 
-  return {
-    name: config.name,
-    description: config.description,
-    inputSchema: schemaHandler || createSchemaHandler(z.object({})),
-    handler: async (args) => {
-      try {
-        const validated = schemaHandler ? schemaHandler.parse(args) as T : {} as T;
-        const { vaultPath, vaultName } = vaultResolver.resolveVault(validated.vault);
-        return await config.handler(validated, vaultPath, vaultName);
-      } catch (error) {
-        if (error instanceof z.ZodError) {
-          throw new McpError(
-            ErrorCode.InvalidRequest,
-            `Invalid arguments: ${error.errors.map(e => e.message).join(", ")}`
-          );
-        }
-        throw error;
-      }
+const outputSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), data: z.record(z.string(), z.unknown()) }).strict(),
+  z.object({ ok: z.literal(false), error: errorSchema }).strict()
+]);
+
+export const READ_ONLY: ToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false
+};
+
+export const CREATE: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false
+};
+
+export const MUTATE: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: false
+};
+
+export function registerTool<Input extends StandardSchemaWithJSON>(
+  server: McpServer,
+  definition: ToolDefinition<Input>
+): void {
+  const handler = (async (
+    input: StandardSchemaWithJSON.InferOutput<Input>,
+    context: { signal: AbortSignal }
+  ): Promise<CallToolResult> => {
+    try {
+      const data = await definition.execute(input, context);
+      const structuredContent = { ok: true, data };
+      return {
+        content: [{ type: "text", text: summarize(definition.title, data) }],
+        structuredContent
+      };
+    } catch (error) {
+      const failure = asToolFailure(error, definition.title.toLocaleLowerCase());
+      const structuredContent = { ok: false, error: failure.toPublic() };
+      return {
+        isError: true,
+        content: [{ type: "text", text: `${failure.code}: ${failure.message}` }],
+        structuredContent
+      };
     }
-  };
+  }) as unknown as ToolCallback<Input>;
+
+  server.registerTool(
+    definition.name,
+    {
+      title: definition.title,
+      description: definition.description,
+      inputSchema: definition.inputSchema,
+      outputSchema,
+      annotations: definition.annotations
+    },
+    handler
+  );
 }
 
-/**
- * Creates a tool that requires no arguments
- */
-export function createToolNoArgs(
-  config: Omit<BaseToolConfig<{}>, "schema">,
-  vaults: Map<string, string>
-): Tool {
-  const vaultResolver = new VaultResolver(vaults);
-
-  return {
-    name: config.name,
-    description: config.description,
-    inputSchema: createSchemaHandler(z.object({})),
-    handler: async () => {
-      try {
-        return await config.handler({}, "", "");
-      } catch (error) {
-        throw error;
-      }
-    }
-  };
+function summarize(title: string, data: ToolData): string {
+  const text = `${title} succeeded.\n${JSON.stringify(data, null, 2)}`;
+  return text.length <= MAX_RESPONSE_CHARACTERS
+    ? text
+    : `${text.slice(0, MAX_RESPONSE_CHARACTERS - 1)}…`;
 }
-
-/**
- * Creates a standardized tool that operates between two vaults
- */
-
-// NOT IN USE
-
-/*
-export function createDualVaultTool<T extends { sourceVault: string; destinationVault: string }>(
-  config: BaseToolConfig<T>,
-  vaults: Map<string, string>
-): Tool {
-  const vaultResolver = new VaultResolver(vaults);
-  const schemaHandler = createSchemaHandler(config.schema);
-
-  return {
-    name: config.name,
-    description: config.description,
-    inputSchema: schemaHandler,
-    handler: async (args) => {
-      try {
-        const validated = schemaHandler.parse(args) as T;
-        const { source, destination, isCrossVault } = vaultResolver.resolveDualVaults(
-          validated.sourceVault,
-          validated.destinationVault
-        );
-        return await config.handler(
-          validated,
-          source.vaultPath,
-          source.vaultName,
-          destination.vaultPath,
-          destination.vaultName,
-          isCrossVault
-        );
-      } catch (error) {
-        if (error instanceof z.ZodError) {
-          throw new McpError(
-            ErrorCode.InvalidRequest,
-            `Invalid arguments: ${error.errors.map(e => e.message).join(", ")}`
-          );
-        }
-        throw error;
-      }
-    }
-  };
-}
-*/

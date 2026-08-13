@@ -1,86 +1,62 @@
-import { z } from "zod";
-import { promises as fs } from "fs";
-import path from "path";
-import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { createTool } from "../../utils/tool-factory.js";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 
-// Input validation schema with descriptions
-const schema = z.object({
-  vault: z.string()
-    .min(1, "Vault name cannot be empty")
-    .describe("Name of the vault where the directory should be created"),
-  path: z.string()
-    .min(1, "Directory path cannot be empty")
-    .refine(dirPath => !path.isAbsolute(dirPath), 
-      "Directory path must be relative to vault root")
-    .describe("Path of the directory to create (relative to vault root)"),
-  recursive: z.boolean()
-    .optional()
-    .default(true)
-    .describe("Create parent directories if they don't exist")
-}).strict();
+import * as z from "zod";
 
-type CreateDirectoryInput = z.infer<typeof schema>;
+import type { Runtime } from "../../runtime.js";
+import type { ToolDefinition } from "../../types.js";
+import { ToolFailure } from "../../utils/errors.js";
+import { relativePathSchema, vaultSchema } from "../../utils/schemas.js";
+import { CREATE } from "../../utils/tool-factory.js";
 
-// Helper function to create directory
-async function createDirectory(
-  vaultPath: string,
-  dirPath: string,
-  recursive: boolean
-): Promise<string> {
-  const fullPath = path.join(vaultPath, dirPath);
-  
-  // Validate path is within vault
-  const normalizedPath = path.normalize(fullPath);
-  if (!normalizedPath.startsWith(path.normalize(vaultPath))) {
-    throw new McpError(
-      ErrorCode.InvalidRequest,
-      "Directory path must be within the vault directory"
-    );
-  }
+export const TOOL_NAME = "obsidian_create_directory";
 
-  try {
-    // Check if directory already exists
-    try {
-      await fs.access(normalizedPath);
-      throw new McpError(
-        ErrorCode.InvalidRequest,
-        `A directory already exists at: ${normalizedPath}`
-      );
-    } catch (error: any) {
-      if (error.code !== 'ENOENT') {
-        throw error;
-      }
-      // Directory doesn't exist, proceed with creation
-      await fs.mkdir(normalizedPath, { recursive });
-      return normalizedPath;
-    }
-  } catch (error: any) {
-    if (error instanceof McpError) {
-      throw error;
-    }
-    throw new McpError(
-      ErrorCode.InternalError,
-      `Failed to create directory: ${error.message}`
-    );
-  }
-}
+const inputSchema = z
+  .object({
+    vault: vaultSchema,
+    path: relativePathSchema,
+    recursive: z.boolean().default(true)
+  })
+  .strict();
 
-export function createCreateDirectoryTool(vaults: Map<string, string>) {
-  return createTool<CreateDirectoryInput>({
-    name: "create-directory",
-    description: "Create a new directory in the specified vault",
-    schema,
-    handler: async (args, vaultPath, _vaultName) => {
-      const createdPath = await createDirectory(vaultPath, args.path, args.recursive ?? true);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Successfully created directory at: ${createdPath}`
+export function createCreateDirectoryTool(runtime: Runtime): ToolDefinition<typeof inputSchema> {
+  return {
+    name: TOOL_NAME,
+    title: "Create Obsidian Directory",
+    description:
+      "Transactionally create a directory inside a vault. Existing directories are rejected.",
+    inputSchema,
+    annotations: CREATE,
+    execute: async ({ vault, path: directory, recursive }) => {
+      const service = runtime.forVault(vault);
+      const entry = await service.fs.resolveNew(directory);
+      const missing: string[] = [];
+      let current = service.vault.root;
+      for (const component of entry.relativePath.split("/")) {
+        current = path.join(current, component);
+        try {
+          const stat = await fs.lstat(current);
+          if (!stat.isDirectory()) {
+            throw new ToolFailure("ALREADY_EXISTS", "A file exists in the directory path.");
           }
-        ]
-      };
+        } catch (error) {
+          if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+            missing.push(current);
+          } else {
+            throw error;
+          }
+        }
+      }
+      if (missing.length === 0) {
+        throw new ToolFailure("ALREADY_EXISTS", "The directory already exists.");
+      }
+      if (!recursive && missing.length > 1) {
+        throw new ToolFailure("NOTE_NOT_FOUND", "The parent directory does not exist.");
+      }
+      const transactionId = await service.transactions.run(
+        missing.map((target) => ({ kind: "mkdir" as const, path: target }))
+      );
+      return { path: entry.relativePath, created: true, transaction_id: transactionId };
     }
-  }, vaults);
+  };
 }

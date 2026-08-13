@@ -1,410 +1,409 @@
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
-import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import * as YAML from "yaml";
 
-interface ParsedNote {
-  frontmatter: Record<string, any>;
-  content: string;
+import { MAX_TAGS } from "../constants.js";
+import { ToolFailure } from "./errors.js";
+
+export type TagLocation = "frontmatter" | "content" | "both";
+export type TagNormalization = "preserve" | "lowercase" | "kebab";
+
+export interface TagOccurrence {
+  tag: string;
+  location: "frontmatter" | "content";
+  line?: number;
+}
+
+interface FrontmatterParts {
+  bom: string;
+  newline: "\n" | "\r\n";
+  source: string;
+  body: string;
   hasFrontmatter: boolean;
 }
 
-interface TagChange {
-  tag: string;
-  location: 'frontmatter' | 'content';
-  line?: number;
-  context?: string;
-}
+const tagCharacter = /[\p{L}\p{M}\p{N}\p{Extended_Pictographic}_/-]/u;
 
-interface TagRemovalReport {
-  removedTags: TagChange[];
-  preservedTags: TagChange[];
-  errors: string[];
-}
-
-/**
- * Checks if tagA is a parent of tagB in a hierarchical structure
- */
-export function isParentTag(parentTag: string, childTag: string): boolean {
-  return childTag.startsWith(parentTag + '/');
-}
-
-/**
- * Matches a tag against a pattern
- * Supports * wildcard and hierarchical matching
- */
-export function matchesTagPattern(pattern: string, tag: string): boolean {
-  // Convert glob pattern to regex
-  const regexPattern = pattern
-    .replace(/\*/g, '.*')
-    .replace(/\//g, '\\/');
-  return new RegExp(`^${regexPattern}$`).test(tag);
-}
-
-/**
- * Gets all related tags (parent/child) for a given tag
- */
-export function getRelatedTags(tag: string, allTags: string[]): {
-  parents: string[];
-  children: string[];
-} {
-  const parents: string[] = [];
-  const children: string[] = [];
-  
-  const parts = tag.split('/');
-  let current = '';
-  
-  // Find parents
-  for (let i = 0; i < parts.length - 1; i++) {
-    current = current ? `${current}/${parts[i]}` : parts[i];
-    parents.push(current);
+export function validateTag(input: string): string {
+  const tag = input.startsWith("#") ? input.slice(1) : input;
+  if (
+    tag.length === 0 ||
+    tag.length > 200 ||
+    /\s/u.test(tag) ||
+    ![...tag].every((character) => tagCharacter.test(character)) ||
+    !/[\p{L}\p{M}\p{Extended_Pictographic}_-]/u.test(tag) ||
+    tag.startsWith("/") ||
+    tag.endsWith("/") ||
+    tag.includes("//")
+  ) {
+    throw new ToolFailure(
+      "INVALID_ARGUMENT",
+      `Invalid tag '${input}'. Tags cannot contain spaces and must contain a non-numeric character.`
+    );
   }
-  
-  // Find children
-  allTags.forEach(otherTag => {
-    if (isParentTag(tag, otherTag)) {
-      children.push(otherTag);
-    }
-  });
-  
-  return { parents, children };
+  return tag;
 }
 
-/**
- * Validates a tag format
- * Allows: #tag, tag, tag/subtag, project/active
- * Disallows: empty strings, spaces, special characters except '/'
- */
-export function validateTag(tag: string): boolean {
-  // Remove leading # if present
-  tag = tag.replace(/^#/, '');
-  
-  // Check if tag is empty
-  if (!tag) return false;
-  
-  // Basic tag format validation
-  const TAG_REGEX = /^[a-zA-Z0-9]+(\/[a-zA-Z0-9]+)*$/;
-  return TAG_REGEX.test(tag);
-}
-
-/**
- * Normalizes a tag to a consistent format
- * Example: ProjectActive -> project-active
- */
-export function normalizeTag(tag: string, normalize = true): string {
-  // Remove leading # if present
-  tag = tag.replace(/^#/, '');
-  
-  if (!normalize) return tag;
-  
-  // Convert camelCase/PascalCase to kebab-case
-  return tag
-    .split('/')
-    .map(part => 
+export function normalizeTag(tag: string, normalization: TagNormalization): string {
+  const validated = validateTag(tag);
+  if (normalization === "preserve") return validated;
+  if (normalization === "lowercase") return validated.toLocaleLowerCase();
+  return validated
+    .split("/")
+    .map((part) =>
       part
-        .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
-        .toLowerCase()
+        .replace(/([\p{Ll}\d])([\p{Lu}])/gu, "$1-$2")
+        .replace(/_+/g, "-")
+        .toLocaleLowerCase()
     )
-    .join('/');
+    .join("/");
 }
 
-/**
- * Parses a note's content into frontmatter and body
- */
-export function parseNote(content: string): ParsedNote {
-  const frontmatterRegex = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
-  const match = content.match(frontmatterRegex);
-
-  if (!match) {
-    return {
-      frontmatter: {},
-      content: content,
-      hasFrontmatter: false
-    };
-  }
-
-  try {
-    const frontmatter = parseYaml(match[1]);
-    return {
-      frontmatter: frontmatter || {},
-      content: match[2],
-      hasFrontmatter: true
-    };
-  } catch (error) {
-    throw new McpError(
-      ErrorCode.InvalidParams,
-      'Invalid frontmatter YAML format'
-    );
-  }
-}
-
-/**
- * Combines frontmatter and content back into a note
- */
-export function stringifyNote(parsed: ParsedNote): string {
-  if (!parsed.hasFrontmatter || Object.keys(parsed.frontmatter).length === 0) {
-    return parsed.content;
-  }
-
-  const frontmatterStr = stringifyYaml(parsed.frontmatter).trim();
-  return `---\n${frontmatterStr}\n---\n\n${parsed.content.trim()}`;
-}
-
-/**
- * Extracts all tags from a note's content
- */
-export function extractTags(content: string): string[] {
-  const tags = new Set<string>();
-  
-  // Match hashtags that aren't inside code blocks or HTML comments
-  const TAG_PATTERN = /(?<!`)#[a-zA-Z0-9][a-zA-Z0-9/]*(?!`)/g;
-  
-  // Split content into lines
-  const lines = content.split('\n');
-  let inCodeBlock = false;
-  let inHtmlComment = false;
-  
-  for (const line of lines) {
-    // Check for code block boundaries
-    if (line.trim().startsWith('```')) {
-      inCodeBlock = !inCodeBlock;
-      continue;
-    }
-    
-    // Check for HTML comment boundaries
-    if (line.includes('<!--')) inHtmlComment = true;
-    if (line.includes('-->')) inHtmlComment = false;
-    
-    // Skip if we're in a code block or HTML comment
-    if (inCodeBlock || inHtmlComment) continue;
-    
-    // Extract tags from the line
-    const matches = line.match(TAG_PATTERN);
-    if (matches) {
-      matches.forEach(tag => tags.add(tag.slice(1))); // Remove # prefix
+export function extractTags(text: string): TagOccurrence[] {
+  const parts = splitFrontmatter(text);
+  const found: TagOccurrence[] = [];
+  if (parts.hasFrontmatter) {
+    for (const tag of readFrontmatterTags(parts.source)) {
+      found.push({ tag, location: "frontmatter" });
     }
   }
-  
-  return Array.from(tags);
+  for (const occurrence of extractInlineTags(parts.body)) found.push(occurrence);
+  return found;
 }
 
-/**
- * Safely adds tags to frontmatter
- */
-export function addTagsToFrontmatter(
-  frontmatter: Record<string, any>,
-  newTags: string[],
-  normalize = true
-): Record<string, any> {
-  const updatedFrontmatter = { ...frontmatter };
-  const existingTags = new Set(
-    Array.isArray(frontmatter.tags) ? frontmatter.tags : []
-  );
-  
-  for (const tag of newTags) {
-    if (!validateTag(tag)) {
-      throw new McpError(
-        ErrorCode.InvalidParams,
-        `Invalid tag format: ${tag}`
-      );
-    }
-    existingTags.add(normalizeTag(tag, normalize));
-  }
-  
-  updatedFrontmatter.tags = Array.from(existingTags).sort();
-  return updatedFrontmatter;
-}
-
-/**
- * Safely removes tags from frontmatter with detailed reporting
- */
-export function removeTagsFromFrontmatter(
-  frontmatter: Record<string, any>,
-  tagsToRemove: string[],
+export function mutateTags(
+  text: string,
   options: {
-    normalize?: boolean;
-    preserveChildren?: boolean;
-    patterns?: string[];
-  } = {}
-): {
-  frontmatter: Record<string, any>;
-  report: {
-    removed: TagChange[];
-    preserved: TagChange[];
-  };
-} {
-  const {
-    normalize = true,
-    preserveChildren = false,
-    patterns = []
-  } = options;
-
-  const updatedFrontmatter = { ...frontmatter };
-  const existingTags = Array.isArray(frontmatter.tags) ? frontmatter.tags : [];
-  const removed: TagChange[] = [];
-  const preserved: TagChange[] = [];
-
-  // Get all related tags if preserving children
-  const relatedTagsMap = new Map(
-    tagsToRemove.map(tag => [
-      tag,
-      preserveChildren ? getRelatedTags(tag, existingTags) : null
-    ])
+    operation: "add" | "remove";
+    tags: readonly string[];
+    patterns?: readonly string[];
+    location: TagLocation;
+    position?: "start" | "end";
+    normalization: TagNormalization;
+    includeChildren?: boolean;
+  }
+): { text: string; changed: string[] } {
+  if (options.tags.length > MAX_TAGS) {
+    throw new ToolFailure("INVALID_ARGUMENT", `At most ${MAX_TAGS} tags may be supplied.`);
+  }
+  const tags = uniqueCaseInsensitive(
+    options.tags.map((tag) => normalizeTag(tag, options.normalization))
   );
+  for (const pattern of options.patterns ?? []) validatePattern(pattern);
+  let parts = splitFrontmatter(text);
+  const changed = new Set<string>();
 
-  const newTags = existingTags.filter(tag => {
-    const normalizedTag = normalizeTag(tag, normalize);
-    
-    // Check if tag should be removed
-    const shouldRemove = tagsToRemove.some(removeTag => {
-      // Direct match
-      if (normalizeTag(removeTag, normalize) === normalizedTag) return true;
-      
-      // Pattern match
-      if (patterns.some(pattern => matchesTagPattern(pattern, normalizedTag))) {
-        return true;
-      }
-      
-      // Hierarchical match (if not preserving children)
-      if (!preserveChildren) {
-        const related = relatedTagsMap.get(removeTag);
-        if (related?.parents.includes(normalizedTag)) return true;
-      }
-      
-      return false;
-    });
+  if (options.location === "frontmatter" || options.location === "both") {
+    const before = readFrontmatterTags(parts.source);
+    const after =
+      options.operation === "add"
+        ? uniqueCaseInsensitive([...before, ...tags])
+        : before.filter((tag) => {
+            const remove = matchesTagSelection(
+              tag,
+              tags,
+              options.patterns ?? [],
+              options.includeChildren ?? false
+            );
+            if (remove) changed.add(tag);
+            return !remove;
+          });
+    if (options.operation === "add") {
+      for (const tag of after) if (!containsCaseInsensitive(before, tag)) changed.add(tag);
+    }
+    if (!sameCaseInsensitive(before, after)) parts = writeFrontmatterTags(parts, after);
+  }
 
-    if (shouldRemove) {
-      removed.push({
-        tag: normalizedTag,
-        location: 'frontmatter'
-      });
-      return false;
+  if (options.location === "content" || options.location === "both") {
+    if (options.operation === "add") {
+      const existing = extractInlineTags(parts.body).map((item) => item.tag);
+      const additions = tags.filter((tag) => !containsCaseInsensitive(existing, tag));
+      if (additions.length > 0) {
+        const line = additions.map((tag) => `#${tag}`).join(" ");
+        parts.body =
+          options.position === "start"
+            ? `${line}${parts.newline}${parts.body}`
+            : `${parts.body}${parts.body.length > 0 && !parts.body.endsWith(parts.newline) ? parts.newline : ""}${line}${parts.newline}`;
+        additions.forEach((tag) => changed.add(tag));
+      }
     } else {
-      preserved.push({
-        tag: normalizedTag,
-        location: 'frontmatter'
-      });
-      return true;
+      const result = removeInlineTags(
+        parts.body,
+        tags,
+        options.patterns ?? [],
+        options.includeChildren ?? false
+      );
+      parts.body = result.text;
+      result.removed.forEach((tag) => changed.add(tag));
     }
-  });
+  }
+  return { text: joinFrontmatter(parts), changed: [...changed].sort() };
+}
 
-  updatedFrontmatter.tags = newTags.sort();
+export function renameTag(
+  text: string,
+  oldTag: string,
+  newTag: string,
+  options: { location: TagLocation; includeChildren: boolean; normalization: TagNormalization }
+): { text: string; replacements: number } {
+  const oldValue = normalizeTag(oldTag, options.normalization);
+  const newValue = normalizeTag(newTag, options.normalization);
+  let parts = splitFrontmatter(text);
+  let replacements = 0;
+  const replace = (value: string): string => {
+    const lower = value.toLocaleLowerCase();
+    const oldLower = oldValue.toLocaleLowerCase();
+    if (lower === oldLower) {
+      replacements += 1;
+      return newValue;
+    }
+    if (options.includeChildren && lower.startsWith(`${oldLower}/`)) {
+      replacements += 1;
+      return `${newValue}${value.slice(oldValue.length)}`;
+    }
+    return value;
+  };
+  if (options.location === "frontmatter" || options.location === "both") {
+    const before = readFrontmatterTags(parts.source);
+    const after = uniqueCaseInsensitive(before.map(replace));
+    if (!sameCaseInsensitive(before, after)) parts = writeFrontmatterTags(parts, after);
+  }
+  if (options.location === "content" || options.location === "both") {
+    parts.body = transformVisibleMarkdown(parts.body, (visible) =>
+      visible.replace(
+        inlineTagPattern(),
+        (_whole: string, prefix: string, tag: string) => `${prefix}#${replace(tag)}`
+      )
+    );
+  }
+  return { text: joinFrontmatter(parts), replacements };
+}
+
+export function wildcardMatch(pattern: string, value: string): boolean {
+  const source = pattern.toLocaleLowerCase();
+  const target = value.toLocaleLowerCase();
+  let sourceIndex = 0;
+  let targetIndex = 0;
+  let starIndex = -1;
+  let checkpoint = -1;
+  while (targetIndex < target.length) {
+    if (source[sourceIndex] === target[targetIndex]) {
+      sourceIndex += 1;
+      targetIndex += 1;
+    } else if (source[sourceIndex] === "*") {
+      starIndex = sourceIndex;
+      sourceIndex += 1;
+      checkpoint = targetIndex;
+    } else if (starIndex !== -1) {
+      sourceIndex = starIndex + 1;
+      checkpoint += 1;
+      targetIndex = checkpoint;
+    } else {
+      return false;
+    }
+  }
+  while (source[sourceIndex] === "*") sourceIndex += 1;
+  return sourceIndex === source.length;
+}
+
+function splitFrontmatter(text: string): FrontmatterParts {
+  const bom = text.startsWith("\uFEFF") ? "\uFEFF" : "";
+  const withoutBom = bom === "" ? text : text.slice(1);
+  const newline = withoutBom.includes("\r\n") ? "\r\n" : "\n";
+  if (!withoutBom.startsWith(`---${newline}`)) {
+    return { bom, newline, source: "", body: withoutBom, hasFrontmatter: false };
+  }
+  const end = withoutBom.indexOf(`${newline}---${newline}`, 4);
+  if (end === -1) return { bom, newline, source: "", body: withoutBom, hasFrontmatter: false };
   return {
-    frontmatter: updatedFrontmatter,
-    report: { removed, preserved }
+    bom,
+    newline,
+    source: withoutBom.slice(4, end),
+    body: withoutBom.slice(end + newline.length * 2 + 3),
+    hasFrontmatter: true
   };
 }
 
-/**
- * Removes inline tags from content with detailed reporting
- */
-export function removeInlineTags(
-  content: string,
-  tagsToRemove: string[],
-  options: {
-    normalize?: boolean;
-    preserveChildren?: boolean;
-    patterns?: string[];
-  } = {}
-): {
-  content: string;
-  report: {
-    removed: TagChange[];
-    preserved: TagChange[];
-  };
-} {
-  const {
-    normalize = true,
-    preserveChildren = false,
-    patterns = []
-  } = options;
+function joinFrontmatter(parts: FrontmatterParts): string {
+  if (!parts.hasFrontmatter) return `${parts.bom}${parts.body}`;
+  return `${parts.bom}---${parts.newline}${parts.source}${parts.newline}---${parts.newline}${parts.body}`;
+}
 
-  const removed: TagChange[] = [];
-  const preserved: TagChange[] = [];
-  
-  // Process content line by line to track context
-  const lines = content.split('\n');
-  let inCodeBlock = false;
-  let inHtmlComment = false;
-  let modifiedLines = lines.map((line, lineNum) => {
-    // Track code blocks and comments
-    if (line.trim().startsWith('```')) {
-      inCodeBlock = !inCodeBlock;
-      return line;
+function readFrontmatterTags(source: string): string[] {
+  if (source === "") return [];
+  try {
+    const document = YAML.parseDocument(source, { keepSourceTokens: true, prettyErrors: false });
+    if (document.errors.length > 0) throw new Error(document.errors[0]?.message ?? "Invalid YAML");
+    const object = document.toJS() as Record<string, unknown> | null;
+    const value = object?.tags;
+    if (Array.isArray(value)) return value.map(String).map(validateTag);
+    if (typeof value === "string") {
+      return value
+        .split(/[\s,]+/u)
+        .filter(Boolean)
+        .map(validateTag);
     }
-    if (line.includes('<!--')) inHtmlComment = true;
-    if (line.includes('-->')) inHtmlComment = false;
-    if (inCodeBlock || inHtmlComment) {
-      // Preserve tags in code blocks and comments
-      const tags = line.match(/(?<!`)#[a-zA-Z0-9][a-zA-Z0-9/]*(?!`)/g) || [];
-      tags.forEach(tag => {
-        preserved.push({
-          tag: tag.slice(1),
-          location: 'content',
-          line: lineNum + 1,
-          context: line.trim()
-        });
-      });
-      return line;
+    return [];
+  } catch (error) {
+    throw new ToolFailure("INVALID_FRONTMATTER", "The note has invalid YAML frontmatter.", {
+      cause: error
+    });
+  }
+}
+
+function writeFrontmatterTags(parts: FrontmatterParts, tags: readonly string[]): FrontmatterParts {
+  try {
+    const document = parts.hasFrontmatter
+      ? YAML.parseDocument(parts.source, { keepSourceTokens: true, prettyErrors: false })
+      : new YAML.Document();
+    if (document.errors.length > 0) throw new Error(document.errors[0]?.message ?? "Invalid YAML");
+    if (document.contents === null) document.contents = document.createNode({});
+    if (tags.length === 0) document.delete("tags");
+    else document.set("tags", [...tags]);
+    const source = document
+      .toString({ lineWidth: 0 })
+      .replace(/\n$/u, "")
+      .replaceAll("\n", parts.newline);
+    return { ...parts, hasFrontmatter: true, source };
+  } catch (error) {
+    throw new ToolFailure("INVALID_FRONTMATTER", "The note has invalid YAML frontmatter.", {
+      cause: error
+    });
+  }
+}
+
+function extractInlineTags(body: string): TagOccurrence[] {
+  const output: TagOccurrence[] = [];
+  transformVisibleMarkdown(body, (visible, line) => {
+    for (const match of visible.matchAll(inlineTagPattern())) {
+      const tag = match[2];
+      if (tag !== undefined) output.push({ tag, location: "content", line });
     }
-
-    // Process tags in regular content
-    return line.replace(
-      /(?<!`)#[a-zA-Z0-9][a-zA-Z0-9/]*(?!`)/g,
-      (match) => {
-        const tag = match.slice(1); // Remove # prefix
-        const normalizedTag = normalizeTag(tag, normalize);
-        
-        const shouldRemove = tagsToRemove.some(removeTag => {
-          // Direct match
-          if (normalizeTag(removeTag, normalize) === normalizedTag) return true;
-          
-          // Pattern match
-          if (patterns.some(pattern => matchesTagPattern(pattern, normalizedTag))) {
-            return true;
-          }
-          
-          // Hierarchical match (if not preserving children)
-          if (!preserveChildren && isParentTag(removeTag, normalizedTag)) {
-            return true;
-          }
-          
-          return false;
-        });
-
-        if (shouldRemove) {
-          removed.push({
-            tag: normalizedTag,
-            location: 'content',
-            line: lineNum + 1,
-            context: line.trim()
-          });
-          return '';
-        } else {
-          preserved.push({
-            tag: normalizedTag,
-            location: 'content',
-            line: lineNum + 1,
-            context: line.trim()
-          });
-          return match;
-        }
-      }
-    );
+    return visible;
   });
+  return output;
+}
 
-  // Clean up empty lines created by tag removal
-  modifiedLines = modifiedLines.reduce((acc: string[], line: string) => {
-    if (line.trim() === '') {
-      if (acc[acc.length - 1]?.trim() === '') {
-        return acc;
+function removeInlineTags(
+  body: string,
+  tags: readonly string[],
+  patterns: readonly string[],
+  includeChildren: boolean
+): { text: string; removed: string[] } {
+  const removed: string[] = [];
+  const text = transformVisibleMarkdown(body, (visible) =>
+    visible.replace(inlineTagPattern(), (whole: string, prefix: string, tag: string) => {
+      if (!matchesTagSelection(tag, tags, patterns, includeChildren)) return whole;
+      removed.push(tag);
+      return prefix;
+    })
+  );
+  return { text, removed };
+}
+
+function transformVisibleMarkdown(
+  text: string,
+  transform: (visible: string, line: number) => string
+): string {
+  const lines = text.split(/(?<=\n)/u);
+  let fenced = false;
+  let comment = false;
+  return lines
+    .map((line, index) => {
+      if (/^\s*(?:```|~~~)/u.test(line)) {
+        fenced = !fenced;
+        return line;
       }
-    }
-    acc.push(line);
-    return acc;
-  }, []);
+      if (fenced) return line;
+      let output = "";
+      let visible = "";
+      let inlineTicks = 0;
+      const flush = (): void => {
+        output += transform(visible, index + 1);
+        visible = "";
+      };
+      for (let cursor = 0; cursor < line.length; cursor += 1) {
+        if (!comment && inlineTicks === 0 && line.startsWith("<!--", cursor)) {
+          flush();
+          comment = true;
+        }
+        if (comment) {
+          output += line[cursor];
+          if (line.startsWith("-->", cursor)) {
+            output += "->";
+            cursor += 2;
+            comment = false;
+          }
+          continue;
+        }
+        if (line[cursor] === "`") {
+          flush();
+          let count = 1;
+          while (line[cursor + count] === "`") count += 1;
+          const ticks = "`".repeat(count);
+          output += ticks;
+          cursor += count - 1;
+          inlineTicks = inlineTicks === 0 ? count : inlineTicks === count ? 0 : inlineTicks;
+          continue;
+        }
+        if (inlineTicks > 0) output += line[cursor];
+        else visible += line[cursor];
+      }
+      flush();
+      return output;
+    })
+    .join("");
+}
 
-  return {
-    content: modifiedLines.join('\n'),
-    report: { removed, preserved }
-  };
+function inlineTagPattern(): RegExp {
+  return /(^|[^\p{L}\p{M}\p{N}_/\\])#([\p{L}\p{M}\p{N}\p{Extended_Pictographic}_/-]*[\p{L}\p{M}\p{Extended_Pictographic}_-][\p{L}\p{M}\p{N}\p{Extended_Pictographic}_/-]*)/gu;
+}
+
+function matchesTagSelection(
+  candidate: string,
+  tags: readonly string[],
+  patterns: readonly string[],
+  includeChildren: boolean
+): boolean {
+  const lower = candidate.toLocaleLowerCase();
+  return (
+    tags.some(
+      (tag) =>
+        lower === tag.toLocaleLowerCase() ||
+        (includeChildren && lower.startsWith(`${tag.toLocaleLowerCase()}/`))
+    ) || patterns.some((pattern) => wildcardMatch(pattern, candidate))
+  );
+}
+
+function validatePattern(pattern: string): void {
+  if (
+    pattern.length === 0 ||
+    pattern.length > 200 ||
+    /\s/u.test(pattern) ||
+    pattern.includes("**")
+  ) {
+    throw new ToolFailure(
+      "INVALID_ARGUMENT",
+      "Tag patterns must be 1-200 characters with single '*' wildcards."
+    );
+  }
+}
+
+function uniqueCaseInsensitive(values: readonly string[]): string[] {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const key = value.toLocaleLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      output.push(value);
+    }
+  }
+  return output;
+}
+
+function containsCaseInsensitive(values: readonly string[], candidate: string): boolean {
+  return values.some((value) => value.toLocaleLowerCase() === candidate.toLocaleLowerCase());
+}
+
+function sameCaseInsensitive(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }

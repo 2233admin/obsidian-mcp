@@ -1,97 +1,58 @@
-import { z } from "zod";
-import { promises as fs } from "fs";
-import path from "path";
-import { McpError } from "@modelcontextprotocol/sdk/types.js";
-import { ensureMarkdownExtension, validateVaultPath } from "../../utils/path.js";
-import { fileExists, ensureDirectory } from "../../utils/files.js";
-import { updateVaultLinks } from "../../utils/links.js";
-import { createNoteExistsError, createNoteNotFoundError, handleFsError } from "../../utils/errors.js";
-import { createTool } from "../../utils/tool-factory.js";
+import * as z from "zod";
 
-// Input validation schema with descriptions
-const schema = z.object({
-  vault: z.string()
-    .min(1, "Vault name cannot be empty")
-    .describe("Name of the vault containing the note"),
-  source: z.string()
-    .min(1, "Source path cannot be empty")
-    .refine(name => !path.isAbsolute(name), 
-      "Source must be a relative path within the vault")
-    .describe("Source path of the note relative to vault root (e.g., 'folder/note.md')"),
-  destination: z.string()
-    .min(1, "Destination path cannot be empty")
-    .refine(name => !path.isAbsolute(name), 
-      "Destination must be a relative path within the vault")
-    .describe("Destination path relative to vault root (e.g., 'new-folder/new-name.md')")
-}).strict();
+import type { Runtime } from "../../runtime.js";
+import type { ToolDefinition } from "../../types.js";
+import { ToolFailure } from "../../utils/errors.js";
+import { planLinkUpdates } from "../../utils/links.js";
+import { etagSchema, relativePathSchema, vaultSchema } from "../../utils/schemas.js";
+import { MUTATE } from "../../utils/tool-factory.js";
+import { assertIfMatch } from "../../utils/validation.js";
 
-type MoveNoteArgs = z.infer<typeof schema>;
+export const TOOL_NAME = "obsidian_move_note";
 
-async function moveNote(
-  args: MoveNoteArgs,
-  vaultPath: string
-): Promise<string> {
-  // Ensure paths are relative to vault
-  const fullSourcePath = path.join(vaultPath, args.source);
-  const fullDestPath = path.join(vaultPath, args.destination);
+const inputSchema = z
+  .object({
+    vault: vaultSchema,
+    source: relativePathSchema,
+    destination: relativePathSchema,
+    update_links: z.boolean().default(true),
+    if_match: etagSchema.optional()
+  })
+  .strict();
 
-  // Validate paths are within vault
-  validateVaultPath(vaultPath, fullSourcePath);
-  validateVaultPath(vaultPath, fullDestPath);
-
-  try {
-    // Check if source exists
-    if (!await fileExists(fullSourcePath)) {
-      throw createNoteNotFoundError(args.source);
-    }
-
-    // Check if destination already exists
-    if (await fileExists(fullDestPath)) {
-      throw createNoteExistsError(args.destination);
-    }
-
-    // Ensure destination directory exists
-    const destDir = path.dirname(fullDestPath);
-    await ensureDirectory(destDir);
-
-    // Move the file
-    await fs.rename(fullSourcePath, fullDestPath);
-    
-    // Update links in the vault
-    const updatedFiles = await updateVaultLinks(vaultPath, args.source, args.destination);
-    
-    return `Successfully moved note from "${args.source}" to "${args.destination}"\n` +
-           `Updated links in ${updatedFiles} file${updatedFiles === 1 ? '' : 's'}`;
-  } catch (error) {
-    if (error instanceof McpError) {
-      throw error;
-    }
-    throw handleFsError(error, 'move note');
-  }
-}
-
-export function createMoveNoteTool(vaults: Map<string, string>) {
-  return createTool<MoveNoteArgs>({
-    name: "move-note",
-    description: "Move/rename a note while preserving links",
-    schema,
-    handler: async (args, vaultPath, vaultName) => {
-      const argsWithExt: MoveNoteArgs = {
-        vault: args.vault,
-        source: ensureMarkdownExtension(args.source),
-        destination: ensureMarkdownExtension(args.destination)
-      };
-      
-      const resultMessage = await moveNote(argsWithExt, vaultPath);
-      
+export function createMoveNoteTool(runtime: Runtime): ToolDefinition<typeof inputSchema> {
+  return {
+    name: TOOL_NAME,
+    title: "Move Obsidian Note",
+    description:
+      "Move or rename a note within one vault without overwriting and transactionally update unambiguous backlinks.",
+    inputSchema,
+    annotations: MUTATE,
+    execute: async ({ vault, source, destination, update_links, if_match }) => {
+      const service = runtime.forVault(vault);
+      const from = await service.fs.resolveExisting(source, { markdown: true });
+      const to = await service.fs.resolveNew(destination, { markdown: true });
+      if (from.relativePath === to.relativePath) {
+        throw new ToolFailure("INVALID_ARGUMENT", "Source and destination are identical.");
+      }
+      const read = await service.fs.readText(from);
+      assertIfMatch(if_match, read.etag);
+      const links = update_links
+        ? await planLinkUpdates(service.fs, from.relativePath, to.relativePath, "move")
+        : { changes: [], updatedFiles: [], ambiguousLinks: 0 };
+      const transactionId = await service.transactions.run([
+        { kind: "write", path: to.absolutePath, data: read.bytes, requireMissing: true },
+        { kind: "delete", path: from.absolutePath, expectedEtag: read.etag },
+        ...links.changes
+      ]);
       return {
-        content: [
-          {
-            type: "text",
-            text: resultMessage
-          }
-        ]
+        source: from.relativePath,
+        destination: to.relativePath,
+        etag: read.etag,
+        updated_backlinks: links.updatedFiles,
+        ambiguous_links: links.ambiguousLinks,
+        transaction_id: transactionId
       };
     }
-  }, vaults);
+  };
 }

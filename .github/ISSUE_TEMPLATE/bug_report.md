@@ -20,13 +20,14 @@ Steps to reproduce the behavior:
 **Expected behavior**
 A clear and concise description of what you expected to happen.
 
-**Error logs (if available)**
-Instructions on how to access error logs can be found [here](https://modelcontextprotocol.io/docs/tools/debugging)
-The MCP instructions are only available for MacOS at this time.
+**Diagnostics and logs (if available)**
+Run `obsidian-mcp doctor` with the same `--vault` arguments and include its sanitized output. Include stderr logs, but remove personal paths and vault content first. Never paste MCP stdio traffic containing note data.
 
-**Desktop (please complete the following information):**
- - OS: [e.g. iOS]
- - AI Client [e.g. Claude]
+**Environment (please complete the following information):**
+- OS and version: [e.g. Windows 11, macOS 15, Ubuntu 24.04]
+- Node.js version: [e.g. 24.1.0]
+- `obsidian-mcp` version: [e.g. 2.0.0-beta.1]
+- MCP client and version:
 
 **Additional context**
 Add any other context about the problem here.

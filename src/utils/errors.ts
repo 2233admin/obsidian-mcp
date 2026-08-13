@@ -1,80 +1,84 @@
-import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { z } from "zod";
+export type ToolErrorCode =
+  | "VAULT_NOT_FOUND"
+  | "PATH_REJECTED"
+  | "SYMLINK_NOT_ALLOWED"
+  | "NOTE_NOT_FOUND"
+  | "ALREADY_EXISTS"
+  | "REVISION_CONFLICT"
+  | "LOCK_TIMEOUT"
+  | "INVALID_FRONTMATTER"
+  | "INVALID_ENCODING"
+  | "INVALID_CURSOR"
+  | "INPUT_TOO_LARGE"
+  | "TRANSACTION_FAILED"
+  | "PERMISSION_DENIED"
+  | "FILESYSTEM_ERROR"
+  | "INVALID_ARGUMENT";
 
-/**
- * Wraps common file system errors into McpErrors
- */
-export function handleFsError(error: unknown, operation: string): never {
-  if (error instanceof McpError) {
-    throw error;
+export interface PublicToolError {
+  code: ToolErrorCode;
+  message: string;
+  retryable: boolean;
+  details?: Record<string, unknown>;
+}
+
+export class ToolFailure extends Error {
+  readonly code: ToolErrorCode;
+  readonly retryable: boolean;
+  readonly details: Record<string, unknown> | undefined;
+
+  constructor(
+    code: ToolErrorCode,
+    message: string,
+    options: { retryable?: boolean; details?: Record<string, unknown>; cause?: unknown } = {}
+  ) {
+    super(message, { cause: options.cause });
+    this.name = "ToolFailure";
+    this.code = code;
+    this.retryable = options.retryable ?? false;
+    this.details = options.details;
   }
 
-  if (error instanceof Error) {
-    const nodeError = error as NodeJS.ErrnoException;
-    
-    switch (nodeError.code) {
-      case 'ENOENT':
-        throw new McpError(
-          ErrorCode.InvalidRequest,
-          `File or directory not found: ${nodeError.message}`
-        );
-      case 'EACCES':
-        throw new McpError(
-          ErrorCode.InvalidRequest,
-          `Permission denied: ${nodeError.message}`
-        );
-      case 'EEXIST':
-        throw new McpError(
-          ErrorCode.InvalidRequest,
-          `File or directory already exists: ${nodeError.message}`
-        );
-      case 'ENOSPC':
-        throw new McpError(
-          ErrorCode.InternalError,
-          'Not enough space to write file'
-        );
-      default:
-        throw new McpError(
-          ErrorCode.InternalError,
-          `Failed to ${operation}: ${nodeError.message}`
-        );
+  toPublic(): PublicToolError {
+    return {
+      code: this.code,
+      message: this.message,
+      retryable: this.retryable,
+      ...(this.details === undefined ? {} : { details: this.details })
+    };
+  }
+}
+
+export function asToolFailure(error: unknown, action: string): ToolFailure {
+  if (error instanceof ToolFailure) return error;
+  if (isNodeError(error)) {
+    if (error.code === "ENOENT") {
+      return new ToolFailure("NOTE_NOT_FOUND", `The requested note does not exist.`, {
+        details: { action }
+      });
+    }
+    if (error.code === "EACCES" || error.code === "EPERM") {
+      return new ToolFailure(
+        "PERMISSION_DENIED",
+        `Permission was denied while trying to ${action}.`,
+        {
+          details: { action }
+        }
+      );
+    }
+    if (error.code === "EEXIST") {
+      return new ToolFailure("ALREADY_EXISTS", `The destination already exists.`, {
+        details: { action }
+      });
     }
   }
-
-  throw new McpError(
-    ErrorCode.InternalError,
-    `Unexpected error during ${operation}`
-  );
+  return new ToolFailure("FILESYSTEM_ERROR", `Unable to ${action}.`, {
+    retryable: true,
+    details: { action },
+    cause: error
+  });
 }
 
-/**
- * Handles Zod validation errors by converting them to McpErrors
- */
-export function handleZodError(error: z.ZodError): never {
-  throw new McpError(
-    ErrorCode.InvalidRequest,
-    `Invalid arguments: ${error.errors.map(e => e.message).join(", ")}`
-  );
-}
-
-/**
- * Creates a standardized error for when a note already exists
- */
-export function createNoteExistsError(path: string): McpError {
-  return new McpError(
-    ErrorCode.InvalidRequest,
-    `A note already exists at: ${path}\n\n` +
-    'To prevent accidental modifications, this operation has been cancelled.\n' +
-    'If you want to modify an existing note, please explicitly request to edit or replace it.'
-  );
-}
-
-/**
- * Creates a standardized error for when a note is not found
- */
-export function createNoteNotFoundError(path: string): McpError {
-  return new McpError(
-    ErrorCode.InvalidRequest,
-    `Note "${path}" not found in vault`
-  );
+export function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }

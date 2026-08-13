@@ -1,0 +1,42 @@
+<evaluation>
+  <qa_pair>
+    <question>Identify the configured vault containing a note that discusses a completed launch retrospective, then find the decision recorded under its Results heading. Return only the vault id.</question>
+    <answer>fixture-vault</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Across the archived project notes, determine which project has both a release note and a retrospective and return only its project codename.</question>
+    <answer>Orchid</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Find the note tagged with the nested status representing completed work and determine the year in its YAML date property. Return YYYY.</question>
+    <answer>2024</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Search the historical meeting notes for the decision to retire the old synchronization worker, follow the linked architecture note, and return only the replacement component name.</question>
+    <answer>Relay</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Among notes whose filenames mention a retrospective, identify the one whose body references a launch in the second quarter. Return only its filename including extension.</question>
+    <answer>Orchid Retrospective.md</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Find the project note that links to a block describing the final rollback criterion. Return only the human-readable block identifier.</question>
+    <answer>rollback-threshold</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Compare the archived launch notes and identify the only project with nested tags for both completed status and infrastructure ownership. Return only its codename.</question>
+    <answer>Orchid</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Locate the historical decision whose alias is displayed as “replacement worker,” follow it, and return only the month name in which adoption completed.</question>
+    <answer>June</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Find all content matches for the retired worker across the fixture vault using pagination if necessary. Which linked note contains the authoritative replacement? Return only its filename.</question>
+    <answer>Relay Architecture.md</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Determine whether the completed launch retrospective and its linked release note agree on the final outcome. Answer True or False.</question>
+    <answer>True</answer>
+  </qa_pair>
+</evaluation>

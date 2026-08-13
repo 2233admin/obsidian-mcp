@@ -1,93 +1,79 @@
-import { z } from "zod";
-import { FileOperationResult } from "../../types.js";
-import { promises as fs } from "fs";
-import path from "path";
-import { McpError } from "@modelcontextprotocol/sdk/types.js";
-import { ensureMarkdownExtension, validateVaultPath } from "../../utils/path.js";
-import { fileExists } from "../../utils/files.js";
-import { createNoteNotFoundError, handleFsError } from "../../utils/errors.js";
-import { createToolResponse, formatFileResult } from "../../utils/responses.js";
-import { createTool } from "../../utils/tool-factory.js";
+import * as z from "zod";
 
-// Input validation schema with descriptions
-const schema = z.object({
-  vault: z.string()
-    .min(1, "Vault name cannot be empty")
-    .describe("Name of the vault containing the note"),
-  filename: z.string()
-    .min(1, "Filename cannot be empty")
-    .refine(name => !name.includes('/') && !name.includes('\\'), 
-      "Filename cannot contain path separators - use the 'folder' parameter for paths instead")
-    .describe("Just the note name without any path separators (e.g. 'my-note.md', NOT 'folder/my-note.md')"),
-  folder: z.string()
-    .optional()
-    .refine(folder => !folder || !path.isAbsolute(folder), 
-      "Folder must be a relative path")
-    .describe("Optional subfolder path relative to vault root")
-}).strict();
+import { DEFAULT_READ_CHARACTERS, MAX_RESPONSE_CHARACTERS } from "../../constants.js";
+import type { Runtime } from "../../runtime.js";
+import type { ToolDefinition } from "../../types.js";
+import { ToolFailure } from "../../utils/errors.js";
+import { relativePathSchema, vaultSchema } from "../../utils/schemas.js";
+import { READ_ONLY } from "../../utils/tool-factory.js";
 
-type ReadNoteInput = z.infer<typeof schema>;
+export const TOOL_NAME = "obsidian_read_note";
 
-async function readNote(
-  vaultPath: string,
-  filename: string,
-  folder?: string
-): Promise<FileOperationResult & { content: string }> {
-  const sanitizedFilename = ensureMarkdownExtension(filename);
-  const fullPath = folder
-    ? path.join(vaultPath, folder, sanitizedFilename)
-    : path.join(vaultPath, sanitizedFilename);
-  
-  // Validate path is within vault
-  validateVaultPath(vaultPath, fullPath);
+const inputSchema = z
+  .object({
+    vault: vaultSchema,
+    path: relativePathSchema,
+    cursor: z.string().max(2_048).optional(),
+    max_chars: z.number().int().min(1).max(MAX_RESPONSE_CHARACTERS).default(DEFAULT_READ_CHARACTERS)
+  })
+  .strict();
 
-  try {
-    // Check if file exists
-    if (!await fileExists(fullPath)) {
-      throw createNoteNotFoundError(filename);
+export function createReadNoteTool(runtime: Runtime): ToolDefinition<typeof inputSchema> {
+  return {
+    name: TOOL_NAME,
+    title: "Read Obsidian Note",
+    description:
+      "Read a bounded page of a UTF-8 Markdown note. Use the returned cursor to continue and etag before editing.",
+    inputSchema,
+    annotations: READ_ONLY,
+    execute: async ({ vault, path: notePath, cursor, max_chars }) => {
+      const service = runtime.forVault(vault);
+      const entry = await service.fs.resolveExisting(notePath, { markdown: true });
+      const read = await service.fs.readText(entry);
+      const offset =
+        cursor === undefined ? 0 : decodeReadCursor(cursor, entry.relativePath, read.etag);
+      const content = read.text.slice(offset, offset + max_chars);
+      const nextOffset = offset + content.length;
+      return {
+        path: entry.relativePath,
+        content,
+        etag: read.etag,
+        total_characters: read.text.length,
+        offset,
+        has_more: nextOffset < read.text.length,
+        ...(nextOffset < read.text.length
+          ? { next_cursor: encodeReadCursor(entry.relativePath, read.etag, nextOffset) }
+          : {})
+      };
     }
-
-    // Read the file content
-    const content = await fs.readFile(fullPath, "utf-8");
-
-    return {
-      success: true,
-      message: "Note read successfully",
-      path: fullPath,
-      operation: 'edit', // Using 'edit' since we don't have a 'read' operation type
-      content: content
-    };
-  } catch (error: unknown) {
-    if (error instanceof McpError) {
-      throw error;
-    }
-    throw handleFsError(error, 'read note');
-  }
+  };
 }
 
-export function createReadNoteTool(vaults: Map<string, string>) {
-  return createTool<ReadNoteInput>({
-    name: "read-note",
-    description: `Read the content of an existing note in the vault.
+function encodeReadCursor(notePath: string, etag: string, offset: number): string {
+  return Buffer.from(JSON.stringify({ version: 1, path: notePath, etag, offset })).toString(
+    "base64url"
+  );
+}
 
-Examples:
-- Root note: { "vault": "vault1", "filename": "note.md" }
-- Subfolder note: { "vault": "vault1", "filename": "note.md", "folder": "journal/2024" }
-- INCORRECT: { "filename": "journal/2024/note.md" } (don't put path in filename)`,
-    schema,
-    handler: async (args, vaultPath, _vaultName) => {
-      const result = await readNote(vaultPath, args.filename, args.folder);
-      
-      const formattedResult = formatFileResult({
-        success: result.success,
-        message: result.message,
-        path: result.path,
-        operation: result.operation
-      });
-      
-      return createToolResponse(
-        `${result.content}\n\n${formattedResult}`
-      );
+function decodeReadCursor(cursor: string, notePath: string, etag: string): number {
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Record<
+      string,
+      unknown
+    >;
+    if (
+      value.version !== 1 ||
+      value.path !== notePath ||
+      value.etag !== etag ||
+      !Number.isSafeInteger(value.offset) ||
+      Number(value.offset) < 0
+    ) {
+      throw new Error("Cursor mismatch");
     }
-  }, vaults);
+    return Number(value.offset);
+  } catch (error) {
+    throw new ToolFailure("INVALID_CURSOR", "Read cursor is invalid or the note has changed.", {
+      cause: error
+    });
+  }
 }
