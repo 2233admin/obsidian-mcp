@@ -9,23 +9,38 @@ Version 2 supports both MCP `2026-07-28` and 2025-era clients by default, and re
 
 ## Quick start
 
+Node.js 22 or newer is required:
+
 ```bash
-npm install -g obsidian-mcp
 node --version # v22 or newer
 ```
 
-Each vault must already contain an `.obsidian` directory. Configure the server in your MCP client with an absolute vault path:
+Run with `npx` without installing the package globally. Pinning the major version receives compatible 2.x updates without automatically crossing a future major version:
+
+```bash
+npx -y obsidian-mcp@2 serve --vault notes=/absolute/path/to/vault
+```
+
+Configure an MCP client to launch the same command over stdio:
 
 ```json
 {
   "mcpServers": {
     "obsidian": {
-      "command": "obsidian-mcp",
-      "args": ["serve", "--vault", "notes=/absolute/path/to/vault"]
+      "command": "npx",
+      "args": ["-y", "obsidian-mcp@2", "serve", "--vault", "notes=/absolute/path/to/vault"]
     }
   }
 }
 ```
+
+Alternatively, install the package globally and use `"command": "obsidian-mcp"` with the same arguments beginning at `"serve"`:
+
+```bash
+npm install -g obsidian-mcp@2
+```
+
+Each vault must already contain an `.obsidian` directory and must be configured using an absolute path.
 
 Both protocol eras are served from the same tool definitions. After confirming that your MCP client negotiates `2026-07-28`, you may opt into modern-only mode by adding `"--legacy", "reject"` to `args`.
 
